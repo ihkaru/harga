@@ -1,0 +1,20 @@
+name: Publish Backend to Dev
+on:
+  push:
+    branches:
+      - main
+jobs:
+  FTP-Deploy-Action:
+    name: FTP-Deploy-Action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: composer --version && php --version
+      - name: FTP-Deploy-Action
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ftp.dvlp.asia
+          username: harga-api@dvlp.asia
+          password: ${{ secrets.FTP_PASSWORD_HARGA_API}}
+          protocol: ftps
+          port: 21
