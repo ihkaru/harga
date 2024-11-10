@@ -19,9 +19,9 @@ class KomoditasService
     public function getDataKomoditas($rowTotal = null)
     {
         $rowTotal ??= $this->getJumlahDataKomoditas() * 1 + 1;
-        dump($rowTotal);
+        // dump($rowTotal);
         $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Komoditas'!A1:B$rowTotal");
-        dump(count($data));
+        // dump(count($data));
         return $data;
     }
     public function getMetadata()
@@ -62,9 +62,12 @@ class KomoditasService
         $col = Constants::KOLOM_KOMODITAS;
         $res = $this->toNamedColumn($data, $col, shift: true);
         $chunks = array_chunk($res, 1000); // Bagi menjadi beberapa bagian, misalnya 1000 baris per batch
-
+        $id = $col[0];
+        array_shift($col);
+        // dump($id, $col);
+        Komoditas::whereNotNull('id')->delete();
         foreach ($chunks as $chunk) {
-            Komoditas::upsert($chunk, [$col[0]], $col);
+            Komoditas::upsert($chunk, [$id], $col);
         }
     }
 }

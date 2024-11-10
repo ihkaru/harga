@@ -14,7 +14,7 @@ return new class extends Migration
     {
         Schema::create('hargas', function (Blueprint $table) {
             $table->id();
-            $table->string("id_komoditas_harian")->nullable();
+            $table->string("id_komoditas_harian")->unique();
             $table->string("id_komoditas_pekanan")->nullable();
             $table->string("id_komoditas_bulanan")->nullable();
             $table->string("id_pekan")->nullable();

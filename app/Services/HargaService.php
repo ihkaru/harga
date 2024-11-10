@@ -18,9 +18,9 @@ class HargaService
     public function getDataHarga($rowTotal = null)
     {
         $rowTotal ??= $this->getJumlahDataHarga() * 1 + 1;
-        dump($rowTotal);
+        // dump($rowTotal);
         $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Basis Data Long'!A1:J$rowTotal");
-        dump(count($data));
+        // dump(count($data));
         return $data;
     }
     public function getMetadataHarga()
@@ -62,9 +62,13 @@ class HargaService
         $col = Constants::KOLOM_HARGA;
         $res = $service->toNamedColumn($data, $col, shift: true);
         $chunks = array_chunk($res, 1000); // Bagi menjadi beberapa bagian, misalnya 1000 baris per batch
-
+        $id = $col[0];
+        array_shift($col);
+        // dump($id, $col);
+        Harga::whereNotNull('id')->delete();
         foreach ($chunks as $chunk) {
-            Harga::upsert($chunk, [$col[0]], $col);
+            Harga::upsert($chunk, [$id], $col);
         }
+        Harga::whereNull("harga")->delete();
     }
 }

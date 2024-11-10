@@ -7,3 +7,4 @@ use Illuminate\Support\Facades\Route;
 Route::get("/harga", [HargaController::class, "index"]);
 Route::get("/komoditas", [KomoditasController::class, "index"]);
 Route::get("/komoditas/{idKomoditas}", [KomoditasController::class, "show"]);
+Route::get("/update_komoditas", [KomoditasController::class, "updateKomoditas"]);
