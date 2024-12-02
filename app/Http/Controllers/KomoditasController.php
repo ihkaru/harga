@@ -23,7 +23,9 @@ class KomoditasController extends Controller
     }
     public function index()
     {
-        return response()->json(Komoditas::with("hargas")->get());
+        return response()->json(Komoditas::with(['hargas' => function ($query) {
+            $query->orderBy('id_komoditas_harian', 'asc'); // Ganti 'asc' dengan 'desc' jika ingin urutan menurun
+        }])->get());
     }
     public function updateKomoditas()
     {
@@ -33,7 +35,7 @@ class KomoditasController extends Controller
         try {
             $last_try = now()->toDateString();
             $komoditasService->syncDataKomoditas();
-            $hargaService->syncDataHarga();
+            $hargaService->syncDataHargaGabungan();
             $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
             return response()->json(["message" => "success", 'last_date' => $last_date, 'last_try' => $last_try])->header('Access-Control-Allow-Origin', '*');;
         } catch (Exception $e) {

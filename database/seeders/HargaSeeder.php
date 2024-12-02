@@ -17,6 +17,6 @@ class HargaSeeder extends Seeder
     public function run(): void
     {
         $service = new HargaService();
-        $service->syncDataHarga();
+        $service->syncDataHargaGabungan();
     }
 }

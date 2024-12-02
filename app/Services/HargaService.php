@@ -19,14 +19,18 @@ class HargaService
     {
         $rowTotal ??= $this->getJumlahDataHarga() * 1 + 1;
         // dump($rowTotal);
-        $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Basis Data Long'!A1:J$rowTotal");
+        $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Basis Data Long'!A2:L$rowTotal");
         // dump(count($data));
         return $data;
+    }
+    public function getDataHargaKecamatan($rowTotal = null)
+    {
+        $rowTotal ??= '';
     }
     public function getMetadataHarga()
     {
 
-        $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Basis Data Long Rekap'!A:B");
+        $data = $this->gsheet->getSheetData('19T2PxHgnWvwLmVa-xfnQ9mlV0Qp0NtpAw57VMvKkvCk', "'Analysis_Basis Data Long Rekap'!A2:B");
         return $data;
     }
     public function getJumlahDataHarga()
@@ -46,6 +50,10 @@ class HargaService
             $r = [];
             for ($i = 0; $i < count($col); $i++) {
                 try {
+                    if ($col[$i] == "nama_komoditas") {
+                        continue;
+                        // dump($col[$i]);
+                    }
                     $r[$col[$i]] = $d[$i];
                 } catch (Exception $e) {
                     $r[$col[$i]] = null;
@@ -68,6 +76,42 @@ class HargaService
         Harga::whereNotNull('id')->delete();
         foreach ($chunks as $chunk) {
             Harga::upsert($chunk, [$id], $col);
+        }
+        Harga::whereNull("harga")->delete();
+    }
+
+    public function getDataHargaGabungan($rowTotal = null)
+    {
+        $rowTotal ??= $this->getJumlahDataHargaGabungan() * 1 + 1;
+        // dump($rowTotal);
+        $data = $this->gsheet->getSheetData('1h_q8lzW-pVjTIVnEAtMnC3Wn-cMKRuktR42HgTBmpHM', "'Basis Data Gabungan'!A2:L$rowTotal");
+        // dump(count($data));
+        // dump($data[0]);
+        return $data;
+    }
+
+    public function getMetadataHargaGabungan()
+    {
+
+        $data = $this->gsheet->getSheetData('1h_q8lzW-pVjTIVnEAtMnC3Wn-cMKRuktR42HgTBmpHM', "'Basis Data Gabungan'!N2:O");
+        return $data;
+    }
+    public function getJumlahDataHargaGabungan()
+    {
+        return $this->getMetadataHargaGabungan()[0][1];
+    }
+
+    public function syncDataHargaGabungan()
+    {
+        $service = new HargaService();
+        $data = $service->getDataHargaGabungan();
+        $col = Constants::KOLOM_HARGA_GABUNGAN;
+        $res = $service->toNamedColumn($data, $col, shift: false);
+        // dump($res[0]);
+        $chunks = array_chunk($res, 1000); // Bagi menjadi beberapa bagian, misalnya 1000 baris per batch
+        Harga::whereNotNull('id')->delete();
+        foreach ($chunks as $chunk) {
+            Harga::insert($chunk);
         }
         Harga::whereNull("harga")->delete();
     }
