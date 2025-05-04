@@ -24,7 +24,7 @@ return new class extends Migration
             $table->string("tahun")->nullable();
             $table->string("bulan")->nullable();
             $table->string("tanggal_angka")->nullable();
-            $table->decimal("harga", 15, 2)->nullable();
+            $table->string("harga")->nullable();
             $table->string("responden")->nullable();
             $table->string("kecamatan")->nullable();
             // $table->string("harga")->nullable();
