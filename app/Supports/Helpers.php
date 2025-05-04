@@ -38,7 +38,11 @@ class Helpers
         $epoch = Carbon::create(1970, 1, 1);
 
         // Calculate days between dates
+<<<<<<< HEAD
         $differenceInDays = -$dateObj->diffInDays($epoch);
+=======
+        $differenceInDays = $dateObj->diffInDays($epoch);
+>>>>>>> 09b007952ed43104eb6a70f2935cbb59e5be456c
 
         // Calculate weeks and take integer portion
         $weeks = intval($differenceInDays / 7);
