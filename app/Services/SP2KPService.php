@@ -121,7 +121,7 @@ class SP2KPService
                     'id_komoditas_pekanan' => $idKomoditasPekanan,
                     'id_komoditas_bulanan' => $idKomoditasBulanan,
                     'id_pekan' => $pekan,
-                    'tanggal' => $date->format('Y-m-d'),
+                    'tanggal' => $date->format('d/m/Y'),
                     'id_komoditas' => $item['komoditas_id'],
                     'tahun' => $year,
                     'bulan' => $month,
