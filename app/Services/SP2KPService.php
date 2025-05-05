@@ -99,9 +99,10 @@ class SP2KPService
                 $namaKomoditas = $item['produk']['nama'];
                 $komoditasItem = $komoditas->filter(fn($i) => $i->nama == $namaKomoditas)->first();
                 $idKomoditas = str_pad($komoditasItem->id_komoditas * 1, 3, '0', STR_PAD_LEFT);
-                $idKomoditasHarian = "$idKomoditas-" . $date->format("Y-m-d");
-                $idKomoditasPekanan = "$idKomoditas-" . $date->format("Y-m") . "-" . $pekan;
-                $idKomoditasBulanan = "$idKomoditas-" . $date->format("Y-m");
+                $idKomoditasHarian = "$idKomoditas-" . $date->format("Y-n-d");
+
+                $idKomoditasPekanan = "$idKomoditas-" . $date->format("Y-n") . "-" . $pekan;
+                $idKomoditasBulanan = "$idKomoditas-" . $date->format("Y-n");
 
                 // Get responden/pedagang from the first detail item
                 // $responden = '';
@@ -122,7 +123,7 @@ class SP2KPService
                     'id_komoditas_bulanan' => $idKomoditasBulanan,
                     'id_pekan' => $pekan,
                     'tanggal' => $date->format('j/n/Y'),
-                    'id_komoditas' => $idKomoditas,
+                    'id_komoditas' => $idKomoditas * 1,
                     'tahun' => $year,
                     'bulan' => $month,
                     'tanggal_angka' => $day,
