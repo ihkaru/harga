@@ -35,7 +35,7 @@ class SP2KPService
         int $tipeKomoditasId = 1,
         int $pasarId = 517,
         int $skip = 0,
-        int $take = 100
+        int $take = 10000
     ): array {
         $startDate = $startDate ?? Carbon::now()->subDays(3)->format('Y-m-d');
         $endDate = $endDate ?? Carbon::now()->format('Y-m-d');
