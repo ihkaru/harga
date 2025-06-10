@@ -21,7 +21,8 @@ class Kernel extends ConsoleKernel
         $schedule->command('sp2kp:update-data')
             ->hourly() // Jalankan setiap jam
             ->withoutOverlapping() // Mencegah command berjalan lagi jika yang sebelumnya belum selesai
-            ->runInBackground(); // Jalankan di background
+            ->runInBackground()
+            ->emailOutputOnFailure('ihza2karunia@gmail.com'); // Jalankan di background
     }
 
     /**
