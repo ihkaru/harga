@@ -87,7 +87,7 @@ class SP2KPService
         $komoditas = Komoditas::get();
         // dump($data);
 
-
+        $now = now();
         foreach ($data as $item) {
             try {
                 // Parse date components
@@ -131,6 +131,7 @@ class SP2KPService
                     'harga' => intval($item['harga']),
                     'responden' => null,
                     'kecamatan' => $kecamatan,
+                    'updated_at' => $now
                 ];
 
                 // Insert or update in database
