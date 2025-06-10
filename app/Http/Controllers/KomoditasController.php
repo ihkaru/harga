@@ -27,7 +27,7 @@ class KomoditasController extends Controller
     public function index()
     {
         # Cek data terakhir yang masuk ke database
-        SP2KPService::updateLatestData();
+        // SP2KPService::updateLatestData();
         return response()->json(Komoditas::with(['hargas' => function ($query) {
             $query->orderBy('id_komoditas_harian', 'asc'); // Ganti 'asc' dengan 'desc' jika ingin urutan menurun
         }])->get());
@@ -39,8 +39,8 @@ class KomoditasController extends Controller
 
         try {
             $last_try = now()->toDateString();
-            $komoditasService->syncDataKomoditas();
-            $hargaService->syncDataHargaGabungan();
+            // $komoditasService->syncDataKomoditas();
+            // $hargaService->syncDataHargaGabungan();
             SP2KPService::updateLatestData();
             try {
                 $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
