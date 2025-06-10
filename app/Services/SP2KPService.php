@@ -70,6 +70,7 @@ class SP2KPService
                 'message' => $e->getMessage(),
                 'params' => $params
             ]);
+            dd($e);
             return [];
         }
     }
