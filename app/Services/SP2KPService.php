@@ -224,7 +224,8 @@ class SP2KPService
         } catch (Exception $e) {
             $lastDate = Carbon::createFromFormat('Y-m-d', Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first()->tanggal);
         }
-        $now = TanggalMerah::getHariTerakhirTidakLibur();
+        // $now = TanggalMerah::getHariTerakhirTidakLibur();
+        $now = Carbon::parse($lastDate)->addDays(5);
         if ($lastDate->lt($now) && !$lastDate->isSameDay($now)) {
             // dump($lastDate, $now);
             self::harvestAllData($lastDate, $now);
