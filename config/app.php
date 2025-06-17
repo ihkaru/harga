@@ -27,6 +27,8 @@ return [
     */
 
     'env' => env('APP_ENV', 'production'),
+    'pull_from_gsheet' => env('PULL_FROM_GSHEET', false),
+    'pull_from_sp2kp' => env('PULL_FROM_SP2KP', true),
 
     /*
     |--------------------------------------------------------------------------

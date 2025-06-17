@@ -6,6 +6,7 @@ use App\Models\Harga;
 use App\Models\Komoditas;
 use App\Services\GoogleSheetsService;
 use App\Supports\Constants;
+use Error;
 use Exception;
 use PDO;
 
@@ -59,6 +60,9 @@ class KomoditasService
     public function syncDataKomoditas()
     {
         $data = $this->getDataKomoditas();
+        if (count($data) < 1) {
+            dd("No data from google sheet");
+        }
         $col = Constants::KOLOM_KOMODITAS;
         $res = $this->toNamedColumn($data, $col, shift: true);
         $chunks = array_chunk($res, 1000); // Bagi menjadi beberapa bagian, misalnya 1000 baris per batch

@@ -28,9 +28,14 @@ class KomoditasController extends Controller
     {
         # Cek data terakhir yang masuk ke database
         // SP2KPService::updateLatestData();
-        return response()->json(Komoditas::with(['hargas' => function ($query) {
+        $data = Komoditas::with(['hargas' => function ($query) {
             $query->orderBy('id_komoditas_harian', 'asc'); // Ganti 'asc' dengan 'desc' jika ingin urutan menurun
-        }])->get());
+        }])->get();
+        // dd(count($data));
+        if (count($data) < 1) {
+            $this->updateKomoditas();
+        }
+        return response()->json($data);
     }
     public function updateKomoditas()
     {
@@ -39,9 +44,13 @@ class KomoditasController extends Controller
 
         try {
             $last_try = now()->toDateString();
-            // $komoditasService->syncDataKomoditas();
-            // $hargaService->syncDataHargaGabungan();
-            SP2KPService::updateLatestData();
+            if (config('app.pull_from_gsheet')) {
+                $komoditasService->syncDataKomoditas();
+                $hargaService->syncDataHargaGabungan();
+            }
+            if (config('app.pull_from_sp2kp')) {
+                SP2KPService::updateLatestData();
+            }
             try {
                 $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
             } catch (Exception $e) {
