@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class AnalisisMonitoringSuggestion extends Model {
     protected $guarded = ['id']; // Eksplisit nama tabel
+    protected $table = 'analisis_monitoring_suggestions';
 
     public function analisisHarga(): BelongsTo {
         return $this->belongsTo(AnalisisHarga::class);

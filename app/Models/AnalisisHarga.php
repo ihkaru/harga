@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class AnalisisHarga extends Model {
     use HasFactory;
+    protected $table = 'analisis_harga';
 
     // Lindungi dari mass assignment
     protected $guarded = ['id'];
