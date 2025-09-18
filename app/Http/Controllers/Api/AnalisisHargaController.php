@@ -197,6 +197,11 @@ class AnalisisHargaController extends Controller {
             return $q->where('analysis_date', '<=', $endDate);
         });
 
+        // Jika 'end_date' ada di request, tambahkan klausa where
+        $query->when($request->limit, function ($q, $limit) {
+            return $q->limit($limit);
+        });
+
         // 4. Urutkan hasilnya berdasarkan tanggal analisis terbaru dan eksekusi query
         $analisis = $query->latest('analysis_date')->get();
 
