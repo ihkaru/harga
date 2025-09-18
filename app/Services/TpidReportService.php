@@ -6,33 +6,60 @@ use App\Models\Harga;
 use App\Models\Komoditas;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 class TpidReportService {
 
-    public function getTopMovers($limit = 5, $days = 7) {
-        $allCommodities = Komoditas::all();
+    /**
+     * PERBAIKAN: Fungsi ini dioptimalkan untuk menghindari N+1 Query.
+     * Mengasumsikan kolom 'tanggal' adalah string 'd/m/Y'.
+     *
+     * @param int $limit
+     * @param int $days
+     * @return Collection
+     */
+    public function getTopMovers($limit = 5, $days = 7): Collection {
+        // Peringatan: Sangat direkomendasikan untuk mengubah kolom 'tanggal' menjadi tipe DATE di database.
+        // Jika sudah DATE, hapus semua Carbon::createFromFormat.
+
+        // 1. Ambil semua data harga dalam rentang waktu yang relevan (misal: 100 hari terakhir) dalam satu query.
+        // Ini jauh lebih efisien daripada query di dalam loop.
+        $allPrices = Harga::whereIn('id_komoditas', Komoditas::pluck('id_komoditas'))
+            ->orderBy('id_komoditas')
+            ->orderByRaw("STR_TO_DATE(tanggal, '%d/%m/%Y') DESC") // <-- Order berdasarkan tanggal yang dikonversi
+            ->limit(40 * 100) // Ambil cukup data untuk setiap komoditas
+            ->get();
+
+        if ($allPrices->isEmpty()) {
+            return new Collection();
+        }
+
+        // 2. Kelompokkan berdasarkan id_komoditas
+        $pricesByCommodity = $allPrices->groupBy('id_komoditas');
+        $allCommodities = Komoditas::whereIn('id_komoditas', $pricesByCommodity->keys())->get()->keyBy('id_komoditas');
         $changes = new Collection();
 
-        foreach ($allCommodities as $komoditas) {
-            // Ambil harga terbaru dan harga X hari yang lalu
-            $latestPriceRecord = Harga::where('id_komoditas', $komoditas->id_komoditas)->orderBy('tanggal', 'desc')->first();
+        foreach ($pricesByCommodity as $id_komoditas => $prices) {
+            // Urutkan sekali lagi di collection untuk memastikan (terkadang groupBy bisa mengubah urutan)
+            $sortedPrices = $prices->sortByDesc(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal));
 
+            $latestPriceRecord = $sortedPrices->first();
             if (!$latestPriceRecord) {
                 continue;
             }
 
-            $comparisonDate = Carbon::createFromFormat('d/m/Y', $latestPriceRecord->tanggal)
-                ->subDays($days)
-                ->toDateString();
-            $comparisonPriceRecord = Harga::where('id_komoditas', $komoditas->id_komoditas)
-                ->where('tanggal', '<=', $comparisonDate)
-                ->orderBy('tanggal', 'desc')
-                ->first();
+            $comparisonDate = Carbon::createFromFormat('d/m/Y', $latestPriceRecord->tanggal)->subDays($days);
 
-            if ($latestPriceRecord && $comparisonPriceRecord && $comparisonPriceRecord->harga > 0) {
+            // Cari harga pembanding di dalam collection, bukan query DB lagi
+            $comparisonPriceRecord = $sortedPrices->first(function ($price) use ($comparisonDate) {
+                return Carbon::createFromFormat('d/m/Y', $price->tanggal)->lte($comparisonDate);
+            });
+
+            $komoditas = $allCommodities->get($id_komoditas);
+
+            if ($komoditas && $comparisonPriceRecord && $comparisonPriceRecord->harga > 0) {
                 $latestPrice = (float) $latestPriceRecord->harga;
                 $comparisonPrice = (float) $comparisonPriceRecord->harga;
-
                 $percentageChange = (($latestPrice - $comparisonPrice) / $comparisonPrice) * 100;
 
                 $changes->push([
@@ -44,86 +71,84 @@ class TpidReportService {
             }
         }
 
-        // Urutkan berdasarkan nilai absolut perubahan, dari terbesar ke terkecil
-        $sorted = $changes->sortByDesc(function ($item) {
-            return abs($item['change']);
-        });
+        $sortedChanges = $changes->sortByDesc(fn($item) => abs($item['change']));
 
-        return $sorted->take($limit);
+        return $sortedChanges->values()->take($limit); // Gunakan values() untuk reset keys
     }
     /**
-     * Menghasilkan prompt LLM yang komprehensif untuk analisis TPID berdasarkan data harga.
-     *
-     * @param Komoditas $komoditas
-     * @param Carbon $currentDate Tanggal saat ini untuk memberikan konteks.
-     * @return string
+     * PERBAIKAN: Query disesuaikan untuk menangani format tanggal string 'd/m/Y'
+     * dan diurutkan dengan benar.
      */
     public function generateTpidAnalysisPrompt(Komoditas $komoditas, Carbon $currentDate): string {
-        // 1. Ambil data harga historis (misal, 90 hari terakhir)
-        $prices = Harga::where('id_komoditas', $komoditas->id_komoditas)
-            ->where('tanggal', '<=', '2024-11-30') // Sesuai info data Anda
-            ->orderBy('tanggal', 'desc')
-            ->limit(90)
-            ->get()
-            ->sortBy('tanggal'); // Urutkan kembali dari terlama ke terbaru
+        // Ambil semua data dan lakukan sorting di level collection.
+        // Ini kurang efisien dibanding sorting di DB, tapi lebih aman untuk format tanggal string.
+        $allPricesForCommodity = Harga::where('id_komoditas', $komoditas->id_komoditas)->get();
+
+        $prices = $allPricesForCommodity
+            ->sortBy(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal))
+            ->slice(-90); // Ambil 90 data terakhir
 
         if ($prices->count() < 2) {
-            return "Data untuk komoditas {$komoditas->nama} tidak cukup untuk dianalisis.";
+            // PERBAIKAN: Kembalikan JSON error yang konsisten, bukan string.
+            return json_encode(['error' => "Data untuk komoditas {$komoditas->nama} tidak cukup untuk dianalisis."]);
         }
 
-        // 2. Lakukan perhitungan statistik
+        // PERBAIKAN: Pastikan data terakhir tidak null sebelum diteruskan.
+        $lastData = $prices->last();
+        if (!$lastData) {
+            return json_encode(['error' => "Gagal mendapatkan data terakhir untuk {$komoditas->nama}."]);
+        }
+
         $statistics = $this->calculateStatistics($prices);
 
-        // 3. Bangun prompt yang kaya konteks
-        return $this->buildPrompt($komoditas, $statistics, $currentDate, $prices->last()->tanggal);
+        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal);
     }
 
+
     /**
-     * Menghitung statistik kunci dari koleksi data harga.
-     *
-     * @param Collection $prices
-     * @return array
+     * PERBAIKAN: Konsisten menggunakan createFromFormat untuk semua operasi tanggal.
      */
     private function calculateStatistics(Collection $prices): array {
         $latest = $prices->last();
         $latestPrice = (float) $latest->harga;
 
-        // Ambil data pembanding
         $previousDay = $prices->slice(-2, 1)->first();
+
+        // PERBAIKAN: Gunakan Carbon untuk perbandingan tanggal yang akurat pada collection
         $latestDate = Carbon::createFromFormat('d/m/Y', $latest->tanggal);
+        $sevenDaysAgoDate = $latestDate->copy()->subDays(7);
+        $thirtyDaysAgoDate = $latestDate->copy()->subDays(30);
 
-        $sevenDaysAgo = $prices
-            ->where('tanggal', '<=', $latestDate->copy()->subDays(7)->toDateString())
-            ->last();
+        $sevenDaysAgo = $prices->last(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal)->lte($sevenDaysAgoDate));
+        $thirtyDaysAgo = $prices->last(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal)->lte($thirtyDaysAgoDate));
 
-        $thirtyDaysAgo = $prices
-            ->where('tanggal', '<=', $latestDate->copy()->subDays(30)->toDateString())
-            ->last();
+        // Kalkulasi perubahan (tidak ada perubahan di sini, sudah benar)
+        $dayChange = $previousDay && $previousDay->harga > 0 ? (($latestPrice - $previousDay->harga) / $previousDay->harga) * 100 : 'N/A';
+        $weekChange = $sevenDaysAgo && $sevenDaysAgo->harga > 0 ? (($latestPrice - $sevenDaysAgo->harga) / $sevenDaysAgo->harga) * 100 : 'N/A';
+        $monthChange = $thirtyDaysAgo && $thirtyDaysAgo->harga > 0 ? (($latestPrice - $thirtyDaysAgo->harga) / $thirtyDaysAgo->harga) * 100 : 'N/A';
 
-        // Kalkulasi perubahan
-        $dayChange = $previousDay ? (($latestPrice - $previousDay->harga) / $previousDay->harga) * 100 : 'N/A';
-        $weekChange = $sevenDaysAgo ? (($latestPrice - $sevenDaysAgo->harga) / $sevenDaysAgo->harga) * 100 : 'N/A';
-        $monthChange = $thirtyDaysAgo ? (($latestPrice - $thirtyDaysAgo->harga) / $thirtyDaysAgo->harga) * 100 : 'N/A';
-
-        // Kalkulasi statistik deskriptif pada data yang ada
         $priceValues = $prices->pluck('harga')->map(fn($p) => (float)$p);
         $average = $priceValues->avg();
         $max = $priceValues->max();
         $min = $priceValues->min();
 
-        // Kalkulasi Volatilitas (Standard Deviation)
-        $mean = $priceValues->avg();
-        $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $priceValues->count());
+        // PERBAIKAN: Hindari division by zero jika hanya ada 1 data.
+        $count = $priceValues->count();
+        $stdDev = 0;
+        if ($count > 1) {
+            $mean = $average; // Sudah dihitung
+            $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $count);
+        }
 
         return [
             'latest_price' => $latestPrice,
             'change_daily' => $dayChange,
             'change_weekly' => $weekChange,
             'change_monthly' => $monthChange,
-            'average_90d' => $average,
-            'max_90d' => $max,
-            'min_90d' => $min,
-            'volatility_90d' => $stdDev, // Standar deviasi harga
+            'average_90d' => $average ?: 0, // Hindari null jika collection kosong
+            'max_90d' => $max ?: 0,
+            'min_90d' => $min ?: 0,
+            'volatility_90d' => $stdDev,
         ];
     }
 
@@ -138,7 +163,7 @@ class TpidReportService {
      * @return string
      */
     private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate): string {
-        // Persiapan variabel tetap sama
+        // Persiapan variabel dengan validasi dan formatting yang lebih robust
         $dailyChangeText = is_numeric($stats['change_daily']) ? number_format($stats['change_daily'], 2) . '%' : 'N/A';
         $weeklyChangeText = is_numeric($stats['change_weekly']) ? number_format($stats['change_weekly'], 2) . '%' : 'N/A';
         $monthlyChangeText = is_numeric($stats['change_monthly']) ? number_format($stats['change_monthly'], 2) . '%' : 'N/A';
@@ -147,107 +172,361 @@ class TpidReportService {
         $max90dFormatted = number_format($stats['max_90d'], 0, ',', '.');
         $min90dFormatted = number_format($stats['min_90d'], 0, ',', '.');
         $volatility90dFormatted = number_format($stats['volatility_90d'], 0, ',', '.');
+
+        // Kalkulasi tambahan untuk memberikan konteks yang lebih kaya
+        $priceToAvgRatio = ($stats['latest_price'] / $stats['average_90d']) * 100;
+        $priceToAvgText = number_format($priceToAvgRatio - 100, 2) . '%';
+        $coefficientOfVariation = ($stats['volatility_90d'] / $stats['average_90d']) * 100;
+        $cvText = number_format($coefficientOfVariation, 2) . '%';
+
+        // Kategorisasi komoditas untuk konteks yang lebih tepat
+        $kategoriKomoditas = $this->getKategoriKomoditas($komoditas->nama);
+
         $komoditasNama = $komoditas->nama;
         $tanggalAnalisis = $currentDate->isoFormat('dddd, D MMMM YYYY');
 
+        // Informasi kontekstual tambahan
+        $musimInfo = $this->getMusimInfo($currentDate);
+        $hbknTerdekat = $this->getHBKNTerdekat($currentDate);
+
         $prompt = <<<PROMPT
-**# KONTEKS PERMINTAAN UTAMA #**
-Anda adalah sebuah API canggih yang berfungsi sebagai Ahli Penasihat Kebijakan Ekonomi untuk Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Tugas Anda adalah menginternalisasi "Strategic Playbook TPID" yang diberikan, menganalisis data statistik harian, dan menghasilkan laporan analisis kebijakan yang mendalam dalam format JSON yang ketat.
+**# SISTEM INSTRUKSI UTAMA #**
+Anda adalah API analisis tingkat lanjut yang berperan sebagai **Chief Policy Analyst** untuk Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Anda memiliki keahlian dalam ekonomi regional, manajemen rantai pasok, dan analisis prediktif. Tugas Anda adalah menghasilkan analisis kebijakan yang ACTIONABLE, EVIDENCE-BASED, dan FORWARD-LOOKING.
+
+**## Prinsip Analisis Anda: ##**
+1. **Data-Driven:** Setiap kesimpulan harus didukung oleh bukti statistik yang kuat
+2. **Context-Aware:** Pertimbangkan faktor musiman, geografis, dan sosial-ekonomi lokal
+3. **Risk-Focused:** Prioritaskan identifikasi dan mitigasi risiko inflasi
+4. **Action-Oriented:** Setiap rekomendasi harus spesifik, terukur, dan dapat diimplementasikan
 
 ---
-**# BAGIAN 1: STRATEGIC PLAYBOOK TPID (INTERNALISASI PENGETAHUAN) #**
+**# BAGIAN 1: STRATEGIC PLAYBOOK & KNOWLEDGE BASE #**
 
-**## 1.1. Katalog Pemicu Perubahan Harga (Triggers) ##**
-*   **Sisi Pasokan:** Gangguan cuaca, hama/penyakit, gagal panen, kenaikan harga input (pupuk, pakan), gangguan di sentra produksi utama.
-*   **Sisi Permintaan:** HBKN (Hari Besar Keagamaan Nasional), panic buying, perubahan pola konsumsi, penyaluran bansos.
-*   **Sisi Distribusi & Kebijakan:** Kerusakan infrastruktur, praktik penimbunan, kenaikan harga BBM, perubahan regulasi.
+**## 1.1. Katalog Pemicu Perubahan Harga (Enhanced Triggers) ##**
 
-**## 1.2. Kerangka Kerja Ambang Batas Statistik (Thresholds) ##**
-*   **Level 1: WASPADA (Kuning):** Pergerakan tidak biasa, butuh pantauan intensif.
-    *   *Contoh Volatil (Cabai):* Naik harian >5% (2 hari), atau naik mingguan >10%.
-    *   *Contoh Pokok (Beras):* Naik harian >1% (3 hari), atau naik mingguan >3%.
-*   **Level 2: SIAGA (Oranye):** Tren jelas menuju gangguan, butuh investigasi & persiapan intervensi.
-    *   *Contoh:* Naik mingguan >15% (volatil) atau >5% (pokok), harga melampaui HET, atau 3+ komoditas naik signifikan bersamaan.
-*   **Level 3: AWAS (Merah):** Risiko tinggi, butuh intervensi segera.
-    *   *Contoh:* Naik mingguan >25% (apapun), 5+ komoditas naik >10% bersamaan, laporan kelangkaan masif.
+**### A. Sisi Pasokan (Supply-Side) ###**
+* **Faktor Alam:** Cuaca ekstrem (banjir/kekeringan), serangan hama/penyakit tanaman, musim panen/paceklik, perubahan iklim
+* **Faktor Produksi:** Kenaikan harga input (pupuk, pestisida, pakan ternak, bibit), kelangkaan tenaga kerja, kerusakan alat produksi
+* **Faktor Geografis:** Gangguan di sentra produksi utama (Jawa Barat untuk sayuran, Sulawesi untuk kakao, dll), gagal panen regional
 
-**## 1.3. Matriks Intervensi Kebijakan (Wewenang Kab/Kota) ##**
-*   **Jika Sinyal Oranye & Dugaan Gangguan Pasokan:** Sidak gudang, lapor ke provinsi, siapkan Gerakan Pangan Murah (GPM).
-*   **Jika Sinyal Kuning & Dekat HBKN:** Imbauan publik anti-panic buying, konfirmasi jadwal pasokan ke distributor.
-*   **Jika Sinyal Merah & Dugaan Penimbunan:** Sidak mendadak, koordinasi erat dengan Satgas Pangan (Polri), operasi pasar darurat.
-*   **Jika Sinyal Oranye & Gangguan Infrastruktur:** Koordinasi dengan Dinas PU, cari jalur alternatif.
+**### B. Sisi Permintaan (Demand-Side) ###**
+* **Faktor Musiman:** HBKN (Ramadan, Idul Fitri, Natal, Tahun Baru), musim sekolah, musim hajatan/pernikahan
+* **Faktor Psikologis:** Panic buying, ekspektasi inflasi, informasi hoax/misleading
+* **Faktor Kebijakan:** Penyaluran bansos/BLT, kenaikan UMR, perubahan pola konsumsi
+
+**### C. Sisi Distribusi & Logistik ###**
+* **Infrastruktur:** Kerusakan jalan/jembatan, kemacetan pelabuhan, gangguan transportasi
+* **Market Behavior:** Penimbunan, kartel/oligopoli, spekulasi pedagang
+* **Regulasi:** Perubahan tarif/pajak, pembatasan impor/ekspor, perubahan zonasi distribusi
+
+**### D. Faktor Eksternal ###**
+* **Ekonomi Makro:** Kenaikan BBM, depresiasi rupiah, inflasi global
+* **Geopolitik:** Konflik regional, embargo dagang, gangguan supply chain global
+* **Teknologi:** Gangguan sistem pembayaran, disrupsi e-commerce
+
+**## 1.2. Framework Analisis Multi-Level ##**
+
+**### Level 1: NORMAL (Hijau) ###**
+* **Kriteria:** Pergerakan harga dalam batas wajar, volatilitas rendah
+* **Indikator Komoditas Pokok (Beras, Gula, Minyak):**
+  - Perubahan harian < ±1%
+  - Perubahan mingguan < ±2%
+  - Harga dalam rentang ±5% dari rata-rata 90 hari
+* **Indikator Komoditas Volatil (Cabai, Bawang, Daging Ayam):**
+  - Perubahan harian < ±3%
+  - Perubahan mingguan < ±7%
+  - CV (Coefficient of Variation) < 15%
+
+**### Level 2: WASPADA (Kuning) ###**
+* **Kriteria:** Pergerakan tidak biasa, perlu monitoring intensif
+* **Indikator Komoditas Pokok:**
+  - Perubahan harian 1-2% selama 3 hari berturut
+  - Perubahan mingguan 2-5%
+  - Harga 5-10% di atas rata-rata 90 hari
+* **Indikator Komoditas Volatil:**
+  - Perubahan harian 3-7% selama 2 hari
+  - Perubahan mingguan 7-15%
+  - CV 15-25%
+* **Trigger Tambahan:** Mendekati HBKN (H-30), laporan gangguan supply minor
+
+**### Level 3: SIAGA (Oranye) ###**
+* **Kriteria:** Tren menuju gangguan serius, persiapan intervensi
+* **Indikator Komoditas Pokok:**
+  - Perubahan mingguan 5-10%
+  - Harga 10-20% di atas rata-rata 90 hari
+  - Harga mendekati/melampaui HET (jika ada)
+* **Indikator Komoditas Volatil:**
+  - Perubahan mingguan 15-25%
+  - CV 25-35%
+* **Trigger Tambahan:** 3+ komoditas naik bersamaan, laporan penimbunan
+
+**### Level 4: AWAS (Merah) ###**
+* **Kriteria:** Krisis harga, intervensi mendesak
+* **Indikator Universal:**
+  - Perubahan mingguan >25% (semua komoditas)
+  - Harga >20% di atas rata-rata (komoditas pokok)
+  - 5+ komoditas naik >10% bersamaan
+* **Trigger Tambahan:** Kelangkaan masif, kerusuhan sosial, panic buying meluas
+
+**## 1.3. Matriks Respons Kebijakan Berjenjang ##**
+
+**### Respons Level WASPADA ###**
+1. **Monitoring:** Intensifikasi pemantauan harga harian
+2. **Komunikasi:** Rapat koordinasi mingguan TPID
+3. **Preventif:** Imbauan publik anti-hoax dan panic buying
+4. **Preparasi:** Verifikasi stok dan jalur distribusi
+
+**### Respons Level SIAGA ###**
+1. **Investigasi:** Sidak pasar dan gudang distributor
+2. **Koordinasi:** Lapor ke TPID Provinsi, aktivasi tim lapangan
+3. **Intervensi Soft:** Dialog dengan asosiasi pedagang
+4. **Preparasi Lanjut:** Siapkan skema Gerakan Pangan Murah (GPM)
+
+**### Respons Level AWAS ###**
+1. **Intervensi Keras:** Operasi pasar skala besar
+2. **Enforcement:** Koordinasi Satgas Pangan (Polri/TNI)
+3. **Supply Injection:** Realokasi stok dari daerah surplus
+4. **Komunikasi Krisis:** Press release, hotline pengaduan
+
+**## 1.4. Konteks Spesifik Kabupaten Mempawah ##**
+* **Geografis:** Daerah pesisir dengan akses laut, dekat perbatasan
+* **Demografi:** Populasi multi-etnis, daya beli menengah-bawah
+* **Ekonomi:** Pertanian, perikanan, perdagangan lintas batas
+* **Infrastruktur:** Jalan trans-Kalimantan, pelabuhan kecil
+* **Kerentanan:** Banjir musiman, ketergantungan supply dari Pontianak
+
 ---
-**# BAGIAN 2: DATA HARIAN UNTUK DIANALISIS #**
+**# BAGIAN 2: DATA REAL-TIME UNTUK ANALISIS #**
 
-- **Wilayah:** Kabupaten Mempawah
+**## Informasi Dasar ##**
+- **Wilayah Analisis:** Kabupaten Mempawah, Kalimantan Barat
 - **Komoditas:** {$komoditasNama}
-- **Tanggal Analisis (Hari Ini):** {$tanggalAnalisis}
-- **Data Tersedia Hingga:** {$lastDataDate}
+- **Kategori Komoditas:** {$kategoriKomoditas}
+- **Tanggal Analisis:** {$tanggalAnalisis}
+- **Data Terakhir:** {$lastDataDate}
+- **Konteks Musiman:** {$musimInfo}
+- **HBKN Terdekat:** {$hbknTerdekat}
 
-**## Data Statistik Harga (90 Hari Terakhir): ##**
-- **Harga Terakhir Tercatat:** Rp {$latestPriceFormatted}
-- **Perubahan Harian (DoD):** {$dailyChangeText}
-- **Perubahan Mingguan (WoW):** {$weeklyChangeText}
-- **Perubahan Bulanan (MoM):** {$monthlyChangeText}
-- **Harga Rata-rata (90 Hari):** Rp {$average90dFormatted}
-- **Harga Tertinggi (90 Hari):** Rp {$max90dFormatted}
-- **Harga Terendah (90 Hari):** Rp {$min90dFormatted}
-- **Tingkat Volatilitas (Std Dev, 90 Hari):** Rp {$volatility90dFormatted}
+**## Statistik Harga Komprehensif ##**
+
+**### A. Data Harga Terkini ###**
+- **Harga Saat Ini:** Rp {$latestPriceFormatted}
+- **Deviasi dari Rata-rata:** {$priceToAvgText} dari rata-rata 90 hari
+
+**### B. Dinamika Perubahan ###**
+- **Perubahan Harian (Day-on-Day):** {$dailyChangeText}
+- **Perubahan Mingguan (Week-on-Week):** {$weeklyChangeText}
+- **Perubahan Bulanan (Month-on-Month):** {$monthlyChangeText}
+
+**### C. Statistik Historis 90 Hari ###**
+- **Rata-rata Harga:** Rp {$average90dFormatted}
+- **Harga Tertinggi:** Rp {$max90dFormatted}
+- **Harga Terendah:** Rp {$min90dFormatted}
+- **Volatilitas (Std Dev):** Rp {$volatility90dFormatted}
+- **Coefficient of Variation:** {$cvText}
+
 ---
-**# BAGIAN 3: TUGAS UTAMA ANDA #**
+**# BAGIAN 3: INSTRUKSI OUTPUT & QUALITY CONTROL #**
 
-Berdasarkan internalisasi **"Strategic Playbook"** di Bagian 1 dan analisis **"Data Harian"** di Bagian 2, buatlah laporan dalam format **JSON yang valid dan murni**. Jangan sertakan teks atau markdown di luar blok JSON.
+Berdasarkan analisis mendalam terhadap **Strategic Playbook** dan **Data Real-Time**, hasilkan laporan dalam format **JSON murni** yang memenuhi standar berikut:
 
-**Struktur JSON harus mengikuti skema berikut:**
+**## Schema JSON Output (WAJIB) ##**
 ```json
 {
-  "commodity_name": "string",
-  "analysis_date": "string",
-  "risk_level": {
-    "level": "string (NORMAL / WASPADA / SIAGA / AWAS)",
-    "rationale": "string"
+  "metadata": {
+    "commodity_name": "string",
+    "commodity_category": "string (POKOK/PENTING/VOLATIL)",
+    "analysis_date": "string (format: YYYY-MM-DD)",
+    "data_freshness": "string (format: YYYY-MM-DD)",
+    "analyst_confidence": "string (HIGH/MEDIUM/LOW)"
   },
-  "executive_summary": "string",
-  "detailed_analysis": "string",
-  "suspected_triggers": [
-    "string",
-    "string"
-  ],
-  "recommended_actions": [
-    {
-      "priority": "integer (1-3, 1=tertinggi)",
-      "action": "string",
-      "stakeholder": "string"
+  "risk_assessment": {
+    "risk_level": "string (NORMAL/WASPADA/SIAGA/AWAS)",
+    "risk_score": "number (0-100)",
+    "trend_direction": "string (BULLISH/BEARISH/SIDEWAYS)",
+    "volatility_status": "string (LOW/MODERATE/HIGH/EXTREME)",
+    "rationale": "string (1-2 kalimat penjelasan)"
+  },
+  "executive_summary": {
+    "headline": "string (1 kalimat headline berita)",
+    "key_finding": "string (temuan utama)",
+    "immediate_concern": "string (kekhawatiran mendesak, atau 'Tidak ada' jika normal)"
+  },
+  "price_analysis": {
+    "current_status": "string (deskripsi kondisi harga saat ini)",
+    "historical_context": "string (perbandingan dengan data historis)",
+    "statistical_significance": "string (signifikansi pergerakan harga)",
+    "pattern_identified": "string (pola yang teridentifikasi, jika ada)"
+  },
+  "causal_analysis": {
+    "primary_driver": {
+      "category": "string (SUPPLY/DEMAND/DISTRIBUTION/EXTERNAL)",
+      "specific_trigger": "string",
+      "evidence": "string",
+      "confidence_level": "string (HIGH/MEDIUM/LOW)"
+    },
+    "secondary_factors": [
+      {
+        "factor": "string",
+        "impact": "string (HIGH/MEDIUM/LOW)"
+      }
+    ],
+    "predictive_indicators": [
+      "string (indikator yang perlu diawasi)"
+    ]
+  },
+  "policy_recommendations": {
+    "immediate_actions": [
+      {
+        "priority": "number (1-3)",
+        "action": "string",
+        "timeline": "string (e.g., 'Dalam 24 jam')",
+        "responsible_party": "string",
+        "expected_outcome": "string"
+      }
+    ],
+    "preventive_measures": [
+      {
+        "measure": "string",
+        "implementation": "string"
+      }
+    ],
+    "monitoring_protocol": {
+      "frequency": "string (e.g., 'Harian', 'Mingguan')",
+      "key_metrics": ["string"],
+      "trigger_points": ["string"]
     }
-  ],
-  "investigative_questions": [
-    "string",
-    "string",
-    "string"
-  ]
+  },
+  "stakeholder_actions": {
+    "tpid_kabupaten": ["string"],
+    "dinas_perdagangan": ["string"],
+    "satgas_pangan": ["string"],
+    "asosiasi_pedagang": ["string"]
+  },
+  "investigation_agenda": {
+    "field_verification": [
+      "string (hal yang perlu dicek di lapangan)"
+    ],
+    "data_requirements": [
+      "string (data tambahan yang diperlukan)"
+    ],
+    "strategic_questions": [
+      "string (pertanyaan strategis untuk rapat TPID)"
+    ]
+  },
+  "forward_outlook": {
+    "short_term": "string (prospek 1-7 hari)",
+    "medium_term": "string (prospek 1-4 minggu)",
+    "risk_factors": ["string"],
+    "opportunities": ["string"]
+  }
 }
 ```
 
-**## Penjelasan Isi Setiap Key: ##**
-1.  **`commodity_name`**: Nama komoditas yang dianalisis.
-2.  **`analysis_date`**: Tanggal analisis hari ini.
-3.  **`risk_level`**: Sebuah objek yang berisi:
-    *   **`level`**: Tentukan level risiko berdasarkan **Kerangka Ambang Batas Statistik** dari playbook. Pilih salah satu: "NORMAL", "WASPADA", "SIAGA", atau "AWAS".
-    *   **`rationale`**: Jelaskan secara singkat (1 kalimat) mengapa Anda memilih level risiko tersebut, dengan merujuk pada data statistik.
-4.  **`executive_summary`**: Ringkasan eksekutif singkat (2-3 kalimat) mengenai kondisi harga dan level risiko saat ini.
-5.  **`detailed_analysis`**: Analisis data yang lebih mendalam. Jelaskan tren, perbandingan harga dengan rata-rata, dan signifikansi volatilitas. Gunakan `\n` untuk paragraf baru.
-6.  **`suspected_triggers`**: Berdasarkan **Katalog Pemicu** dari playbook dan pola data, berikan **hipotesis** 1-2 pemicu yang paling mungkin terjadi. Awali dengan kata "Dugaan:" atau "Potensi:". Ini adalah bagian inferensi Anda.
-7.  **`recommended_actions`**: Sebuah **array of objects** yang berisi tindakan konkret. Berdasarkan level risiko dan pemicu yang diduga, rujuk pada **Matriks Intervensi** dari playbook. Setiap objek harus berisi:
-    *   **`priority`**: Prioritas tindakan (1 untuk paling mendesak).
-    *   **`action`**: Deskripsi tindakan yang harus dilakukan.
-    *   **`stakeholder`**: Pihak utama yang harus dilibatkan (contoh: "Dinas Perdagangan, Satgas Pangan").
-8.  **`investigative_questions`**: Sebuah **array of strings** berisi pertanyaan investigatif tajam untuk diajukan dalam rapat TPID guna memvalidasi dugaan pemicu dan mempersiapkan langkah selanjutnya.
+**## Panduan Kualitas Output ##**
 
-**## Aturan Penting: ##**
-- **Sintesis, Jangan Mengarang:** Gunakan playbook untuk membuat koneksi logis antara data dan rekomendasi. Jangan membuat informasi di luar konteks yang diberikan.
-- **Output JSON Murni:** Pastikan output Anda adalah JSON yang valid tanpa teks pembuka/penutup.
+**### 1. Prinsip Analisis ###**
+- **Evidence-Based:** Setiap klaim harus didukung data statistik
+- **Contextual:** Pertimbangkan faktor lokal Mempawah
+- **Actionable:** Rekomendasi harus spesifik dan implementable
+- **Balanced:** Hindari alarmisme berlebihan atau oversimplifikasi
+
+**### 2. Tone & Style ###**
+- **Professional:** Gunakan bahasa formal namun jelas
+- **Concise:** Hindari redundansi, fokus pada insight
+- **Structured:** Gunakan format yang konsisten
+- **Local-Aware:** Sesuaikan dengan konteks Kalimantan Barat
+
+**### 3. Quality Checks ###**
+- **Data Consistency:** Pastikan semua angka konsisten
+- **Logic Flow:** Analisis harus mengalir logis dari data ke rekomendasi
+- **Completeness:** Isi semua field, gunakan "Tidak ada" atau "N/A" jika perlu
+- **JSON Validity:** Output harus valid JSON tanpa syntax error
+
+**### 4. Special Instructions ###**
+- Untuk "analyst_confidence", tentukan berdasarkan:
+  - HIGH: Data lengkap, pola jelas, trigger evident
+  - MEDIUM: Data cukup, pola terlihat, trigger probable
+  - LOW: Data terbatas, pola tidak jelas, trigger uncertain
+
+- Untuk "risk_score" (0-100):
+  - 0-25: NORMAL
+  - 26-50: WASPADA
+  - 51-75: SIAGA
+  - 76-100: AWAS
+
+- Gunakan "\n" untuk line break dalam string panjang
+- Maksimal 3 item untuk immediate_actions
+- Fokus pada tindakan dalam wewenang kabupaten/kota
+
+**## PERINGATAN AKHIR ##**
+- Output HANYA JSON murni, tanpa markdown atau teks tambahan
+- Validasi sintaks JSON sebelum output
+- Prioritaskan akurasi dan relevansi daripada kelengkapan
+- Jika data tidak mencukupi untuk analisis lengkap, indikasikan dalam analyst_confidence
+
+GENERATE JSON OUTPUT NOW:
 PROMPT;
 
         return $prompt;
+    }
+
+    /**
+     * Helper method untuk kategorisasi komoditas
+     */
+    private function getKategoriKomoditas(string $namaKomoditas): string {
+        $kategorisasi = [
+            'POKOK' => ['beras', 'gula pasir', 'minyak goreng', 'tepung terigu', 'garam'],
+            'PENTING' => ['daging sapi', 'daging ayam', 'telur ayam', 'susu', 'jagung', 'kedelai', 'ikan'],
+            'VOLATIL' => ['cabai merah', 'cabai rawit', 'bawang merah', 'bawang putih', 'tomat', 'kentang']
+        ];
+
+        $namaLower = strtolower($namaKomoditas);
+
+        foreach ($kategorisasi as $kategori => $items) {
+            foreach ($items as $item) {
+                if (str_contains($namaLower, $item)) {
+                    return $kategori;
+                }
+            }
+        }
+
+        return 'PENTING'; // Default kategori
+    }
+
+    /**
+     * Helper method untuk informasi musim
+     */
+    private function getMusimInfo(Carbon $date): string {
+        $month = $date->month;
+
+        if ($month >= 4 && $month <= 9) {
+            return "Musim Kemarau (potensi kekeringan, produksi sayuran menurun)";
+        } else {
+            return "Musim Hujan (potensi banjir, gangguan distribusi)";
+        }
+    }
+
+    /**
+     * Helper method untuk HBKN terdekat
+     */
+    private function getHBKNTerdekat(Carbon $date): string {
+        // Simplified implementation - dalam produksi gunakan database HBKN
+        $hbkn = [
+            '2025-03-29' => 'Ramadan (H-30)',
+            '2025-04-29' => 'Idul Fitri (H-30)',
+            '2025-12-25' => 'Natal (H-30)',
+        ];
+
+        foreach ($hbkn as $tanggal => $nama) {
+            $hbknDate = Carbon::parse($tanggal);
+            $diff = $date->diffInDays($hbknDate, false);
+
+            if ($diff > 0 && $diff <= 30) {
+                return "$nama - $diff hari lagi";
+            }
+        }
+
+        return "Tidak ada HBKN dalam 30 hari ke depan";
     }
 }
