@@ -12,12 +12,18 @@ use Illuminate\Validation\ValidationException;
 
 class AnalisisHargaController extends Controller {
     /**
-     * Menerima data analisis dari n8n dan menyimpannya ke database.
+     * Menerima dan menyimpan data analisis harga dari n8n.
+     * Endpoint ini dirancang untuk menerima satu panggilan API dengan
+     * payload JSON yang memiliki struktur: { "data": [ ... ] }.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\JsonResponse
      */
     public function store(Request $request) {
-        // 1. Validasi input utama (harus berupa array)
+        // 1. Validasi input, memastikan 'data' ada dan merupakan array
         $validator = Validator::make($request->all(), [
-            '*.metadata.commodity_name' => 'required|string',
+            'data' => 'required|array',
+            'data.*.metadata.commodity_name' => 'required|string|max:255',
         ]);
 
         if ($validator->fails()) {
@@ -27,42 +33,44 @@ class AnalisisHargaController extends Controller {
         $results = [];
         $errors = [];
 
-        // Gunakan transaksi database untuk memastikan semua data berhasil disimpan
+        // 2. Gunakan DB Transaction untuk memastikan integritas data.
+        // Jika salah satu item gagal, semua perubahan akan dibatalkan.
         DB::beginTransaction();
         try {
-            foreach ($request->all() as $data) {
-                // 2. Cari Komoditas berdasarkan nama
+            // Loop melalui setiap item analisis di dalam array 'data'
+            foreach ($request->input('data') as $data) {
+                // Cari komoditas di database berdasarkan nama yang diterima dari JSON
                 $komoditas = Komoditas::where('nama', $data['metadata']['commodity_name'])->first();
 
                 if (!$komoditas) {
-                    $errors[] = "Komoditas '{$data['metadata']['commodity_name']}' tidak ditemukan.";
-                    continue; // Lanjut ke item berikutnya
+                    $errors[] = "Komoditas '{$data['metadata']['commodity_name']}' tidak ditemukan di database.";
+                    continue; // Lanjut ke item berikutnya jika komoditas tidak ada
                 }
 
-                // 3. Simpan data utama ke tabel 'analisis_harga'
+                // 3. Buat entri utama di tabel 'analisis_harga'
                 $analisis = AnalisisHarga::create([
                     'komoditas_id' => $komoditas->id,
 
-                    // Metadata
+                    // Bagian 'metadata'
                     'commodity_category' => $data['metadata']['commodity_category'] ?? null,
                     'analysis_date' => $data['metadata']['analysis_date'] ?? null,
                     'data_freshness' => $data['metadata']['data_freshness'] ?? null,
                     'analysis_confidence' => $data['metadata']['analysis_confidence'] ?? null,
 
-                    // Price Condition Assessment
+                    // Bagian 'price_condition_assessment'
                     'condition_level' => $data['price_condition_assessment']['condition_level'] ?? null,
                     'volatility_index' => $data['price_condition_assessment']['volatility_index'] ?? null,
                     'trend_direction' => $data['price_condition_assessment']['trend_direction'] ?? null,
                     'statistical_significance' => $data['price_condition_assessment']['statistical_significance'] ?? null,
                     'key_observation' => $data['price_condition_assessment']['key_observation'] ?? null,
 
-                    // Data Insights
+                    // Bagian 'data_insights'
                     'current_position' => $data['data_insights']['current_position'] ?? null,
                     'price_pattern' => $data['data_insights']['price_pattern'] ?? null,
                     'volatility_analysis' => $data['data_insights']['volatility_analysis'] ?? null,
                     'trend_analysis' => $data['data_insights']['trend_analysis'] ?? null,
 
-                    // Statistical Findings
+                    // Bagian 'statistical_findings'
                     'deviation_percentage' => $data['statistical_findings']['deviation_from_average']['percentage'] ?? null,
                     'deviation_interpretation' => $data['statistical_findings']['deviation_from_average']['interpretation'] ?? null,
                     'volatility_level' => $data['statistical_findings']['volatility_assessment']['level'] ?? null,
@@ -70,15 +78,16 @@ class AnalisisHargaController extends Controller {
                     'trend_strength' => $data['statistical_findings']['trend_strength']['strength'] ?? null,
                     'trend_consistency' => $data['statistical_findings']['trend_strength']['consistency'] ?? null,
 
-                    // Forward Indicators
+                    // Bagian 'forward_indicators'
                     'short_term_outlook' => $data['forward_indicators']['short_term_outlook'] ?? null,
                     'pattern_sustainability' => $data['forward_indicators']['pattern_sustainability'] ?? null,
 
-                    // Analysis Limitations
+                    // Bagian 'analysis_limitations'
                     'external_factors_note' => $data['analysis_limitations']['external_factors_note'] ?? null,
                 ]);
 
-                // 4. Simpan data array ke tabel-tabel pendukung
+                // 4. Panggil helper function untuk menyimpan semua data yang berbentuk array
+                // ke tabel-tabel pendukung yang berelasi.
                 $this->saveRelatedData($analisis->dataBasedAlerts(), $data['potential_considerations']['data_based_alerts'] ?? []);
                 $this->saveRelatedData($analisis->monitoringSuggestions(), $data['potential_considerations']['monitoring_suggestions'] ?? []);
                 $this->saveRelatedData($analisis->patternImplications(), $data['potential_considerations']['pattern_implications'] ?? []);
@@ -92,7 +101,7 @@ class AnalisisHargaController extends Controller {
                 $results[] = "Analisis untuk '{$komoditas->nama}' berhasil disimpan.";
             }
 
-            // Jika ada error, batalkan semua perubahan
+            // Jika ada error (misal komoditas tidak ditemukan), batalkan semua operasi database
             if (!empty($errors)) {
                 DB::rollBack();
                 return response()->json([
@@ -102,7 +111,7 @@ class AnalisisHargaController extends Controller {
                 ], 422);
             }
 
-            // Jika semua berhasil, commit transaksi
+            // Jika semua item berhasil diproses, simpan perubahan ke database
             DB::commit();
 
             return response()->json([
@@ -110,27 +119,35 @@ class AnalisisHargaController extends Controller {
                 'results' => $results
             ], 201);
         } catch (\Exception $e) {
-            // Jika terjadi error tak terduga, batalkan transaksi
+            // Jika terjadi kesalahan tak terduga, batalkan transaksi dan kirim response error
             DB::rollBack();
             return response()->json([
-                'message' => 'Terjadi kesalahan pada server.',
+                'message' => 'Terjadi kesalahan internal pada server.',
                 'error' => $e->getMessage()
             ], 500);
         }
     }
 
     /**
-     * Helper function untuk menyimpan item dari array ke relasi.
-     * @param \Illuminate\Database\Eloquent\Relations\HasMany $relation
-     * @param array $items
+     * Helper function untuk menyimpan item dari sebuah array ke dalam tabel relasi.
+     * Fungsi ini bersifat reusable untuk semua data array yang memiliki struktur sama.
+     *
+     * @param \Illuminate\Database\Eloquent\Relations\HasMany $relation Objek relasi Eloquent (misal: $analisis->dataBasedAlerts())
+     * @param array $items Array berisi string yang akan disimpan (misal: ['Alert 1', 'Alert 2'])
      */
     private function saveRelatedData($relation, array $items) {
-        if (empty($items)) return;
+        // Jika array kosong, tidak ada yang perlu dilakukan
+        if (empty($items)) {
+            return;
+        }
 
         $dataToInsert = [];
+        // Ubah array of strings menjadi array of arrays untuk createMany()
         foreach ($items as $item) {
             $dataToInsert[] = ['content' => $item];
         }
+
+        // Gunakan createMany untuk efisiensi (bulk insert)
         $relation->createMany($dataToInsert);
     }
 
