@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AnalisisHargaController;
 use App\Http\Controllers\HargaController;
 use App\Http\Controllers\KomoditasController;
 use App\Http\Controllers\TpidController; // <-- 1. Tambahkan import TpidController
@@ -55,3 +56,9 @@ Route::prefix('tpid/report')->controller(TpidController::class)->group(function 
      */
     Route::get('/full', 'generateFullReport')->name('tpid.report.full');
 });
+
+// Endpoint untuk menerima data dari n8n (POST)
+Route::post('/analisis-harga', [AnalisisHargaController::class, 'store']);
+
+// Endpoint untuk mengambil data untuk frontend (GET)
+Route::get('/analisis-harga', [AnalisisHargaController::class, 'index']);
