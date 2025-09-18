@@ -153,9 +153,25 @@ class AnalisisHargaController extends Controller {
 
     /**
      * Mengambil data analisis untuk ditampilkan di frontend.
+     * Fungsi ini mendukung filter berdasarkan rentang tanggal melalui query parameter.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\JsonResponse
      */
-    public function index() {
-        $analisis = AnalisisHarga::with([
+    public function index(Request $request) {
+        // 1. Validasi input dari query parameter URL
+        $validator = Validator::make($request->query(), [
+            'start_date' => 'nullable|date_format:Y-m-d',
+            'end_date'   => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        // 2. Memulai query builder
+        // Kita tetap memuat semua relasi yang dibutuhkan oleh frontend
+        $query = AnalisisHarga::with([
             'komoditas',
             'dataBasedAlerts',
             'monitoringSuggestions',
@@ -166,10 +182,25 @@ class AnalisisHargaController extends Controller {
             'statisticalWarnings',
             'dataConstraints',
             'assumptionsMade'
-        ])
-            ->latest() // Ambil yang terbaru
-            ->get();
+        ]);
 
+        // 3. Terapkan filter tanggal secara kondisional menggunakan when()
+        // Ini adalah cara Laravel yang elegan untuk menambahkan klausa jika kondisi terpenuhi.
+
+        // Jika 'start_date' ada di request, tambahkan klausa where
+        $query->when($request->start_date, function ($q, $startDate) {
+            return $q->where('analysis_date', '>=', $startDate);
+        });
+
+        // Jika 'end_date' ada di request, tambahkan klausa where
+        $query->when($request->end_date, function ($q, $endDate) {
+            return $q->where('analysis_date', '<=', $endDate);
+        });
+
+        // 4. Urutkan hasilnya berdasarkan tanggal analisis terbaru dan eksekusi query
+        $analisis = $query->latest('analysis_date')->get();
+
+        // 5. Kembalikan data dalam format JSON
         return response()->json($analisis);
     }
 }
