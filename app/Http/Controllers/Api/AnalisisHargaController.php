@@ -24,6 +24,7 @@ class AnalisisHargaController extends Controller {
         $validator = Validator::make($request->all(), [
             'data' => 'required|array',
             'data.*.metadata.commodity_name' => 'required|string|max:255',
+            'data.*.metadata.analysis_date' => 'required|date_format:Y-m-d', // Validasi tanggal juga penting
         ]);
 
         if ($validator->fails()) {
@@ -33,61 +34,63 @@ class AnalisisHargaController extends Controller {
         $results = [];
         $errors = [];
 
-        // 2. Gunakan DB Transaction untuk memastikan integritas data.
-        // Jika salah satu item gagal, semua perubahan akan dibatalkan.
         DB::beginTransaction();
         try {
-            // Loop melalui setiap item analisis di dalam array 'data'
             foreach ($request->input('data') as $data) {
-                // Cari komoditas di database berdasarkan nama yang diterima dari JSON
                 $komoditas = Komoditas::where('nama', $data['metadata']['commodity_name'])->first();
 
                 if (!$komoditas) {
                     $errors[] = "Komoditas '{$data['metadata']['commodity_name']}' tidak ditemukan di database.";
-                    continue; // Lanjut ke item berikutnya jika komoditas tidak ada
+                    continue;
                 }
 
-                // 3. Buat entri utama di tabel 'analisis_harga'
-                $analisis = AnalisisHarga::create([
-                    'komoditas_id' => $komoditas->id,
+                $analysisDate = $data['metadata']['analysis_date'];
 
-                    // Bagian 'metadata'
-                    'commodity_category' => $data['metadata']['commodity_category'] ?? null,
-                    'analysis_date' => $data['metadata']['analysis_date'] ?? null,
-                    'data_freshness' => $data['metadata']['data_freshness'] ?? null,
-                    'analysis_confidence' => $data['metadata']['analysis_confidence'] ?? null,
+                // [PERUBAHAN UTAMA] Mengganti ::create() dengan ::updateOrCreate()
+                $analisis = AnalisisHarga::updateOrCreate(
+                    [
+                        // Kriteria untuk mencari record unik
+                        'komoditas_id'  => $komoditas->id,
+                        'analysis_date' => $analysisDate,
+                    ],
+                    [
+                        // Data untuk diisi atau di-update
+                        'commodity_category' => $data['metadata']['commodity_category'] ?? null,
+                        'data_freshness' => $data['metadata']['data_freshness'] ?? null,
+                        'analysis_confidence' => $data['metadata']['analysis_confidence'] ?? null,
+                        'condition_level' => $data['price_condition_assessment']['condition_level'] ?? null,
+                        'volatility_index' => $data['price_condition_assessment']['volatility_index'] ?? null,
+                        'trend_direction' => $data['price_condition_assessment']['trend_direction'] ?? null,
+                        'statistical_significance' => $data['price_condition_assessment']['statistical_significance'] ?? null,
+                        'key_observation' => $data['price_condition_assessment']['key_observation'] ?? null,
+                        'current_position' => $data['data_insights']['current_position'] ?? null,
+                        'price_pattern' => $data['data_insights']['price_pattern'] ?? null,
+                        'volatility_analysis' => $data['data_insights']['volatility_analysis'] ?? null,
+                        'trend_analysis' => $data['data_insights']['trend_analysis'] ?? null,
+                        'deviation_percentage' => $data['statistical_findings']['deviation_from_average']['percentage'] ?? null,
+                        'deviation_interpretation' => $data['statistical_findings']['deviation_from_average']['interpretation'] ?? null,
+                        'volatility_level' => $data['statistical_findings']['volatility_assessment']['level'] ?? null,
+                        'volatility_cv_interpretation' => $data['statistical_findings']['volatility_assessment']['cv_interpretation'] ?? null,
+                        'trend_strength' => $data['statistical_findings']['trend_strength']['strength'] ?? null,
+                        'trend_consistency' => $data['statistical_findings']['trend_strength']['consistency'] ?? null,
+                        'short_term_outlook' => $data['forward_indicators']['short_term_outlook'] ?? null,
+                        'pattern_sustainability' => $data['forward_indicators']['pattern_sustainability'] ?? null,
+                        'external_factors_note' => $data['analysis_limitations']['external_factors_note'] ?? null,
+                    ]
+                );
 
-                    // Bagian 'price_condition_assessment'
-                    'condition_level' => $data['price_condition_assessment']['condition_level'] ?? null,
-                    'volatility_index' => $data['price_condition_assessment']['volatility_index'] ?? null,
-                    'trend_direction' => $data['price_condition_assessment']['trend_direction'] ?? null,
-                    'statistical_significance' => $data['price_condition_assessment']['statistical_significance'] ?? null,
-                    'key_observation' => $data['price_condition_assessment']['key_observation'] ?? null,
+                // Hapus data relasi lama sebelum menyisipkan yang baru untuk menghindari duplikasi
+                $analisis->dataBasedAlerts()->delete();
+                $analisis->monitoringSuggestions()->delete();
+                $analisis->patternImplications()->delete();
+                $analisis->keyMetricsToWatch()->delete();
+                $analisis->dataQualityNotes()->delete();
+                $analisis->additionalDataSuggestions()->delete();
+                $analisis->statisticalWarnings()->delete();
+                $analisis->dataConstraints()->delete();
+                $analisis->assumptionsMade()->delete();
 
-                    // Bagian 'data_insights'
-                    'current_position' => $data['data_insights']['current_position'] ?? null,
-                    'price_pattern' => $data['data_insights']['price_pattern'] ?? null,
-                    'volatility_analysis' => $data['data_insights']['volatility_analysis'] ?? null,
-                    'trend_analysis' => $data['data_insights']['trend_analysis'] ?? null,
 
-                    // Bagian 'statistical_findings'
-                    'deviation_percentage' => $data['statistical_findings']['deviation_from_average']['percentage'] ?? null,
-                    'deviation_interpretation' => $data['statistical_findings']['deviation_from_average']['interpretation'] ?? null,
-                    'volatility_level' => $data['statistical_findings']['volatility_assessment']['level'] ?? null,
-                    'volatility_cv_interpretation' => $data['statistical_findings']['volatility_assessment']['cv_interpretation'] ?? null,
-                    'trend_strength' => $data['statistical_findings']['trend_strength']['strength'] ?? null,
-                    'trend_consistency' => $data['statistical_findings']['trend_strength']['consistency'] ?? null,
-
-                    // Bagian 'forward_indicators'
-                    'short_term_outlook' => $data['forward_indicators']['short_term_outlook'] ?? null,
-                    'pattern_sustainability' => $data['forward_indicators']['pattern_sustainability'] ?? null,
-
-                    // Bagian 'analysis_limitations'
-                    'external_factors_note' => $data['analysis_limitations']['external_factors_note'] ?? null,
-                ]);
-
-                // 4. Panggil helper function untuk menyimpan semua data yang berbentuk array
-                // ke tabel-tabel pendukung yang berelasi.
                 $this->saveRelatedData($analisis->dataBasedAlerts(), $data['potential_considerations']['data_based_alerts'] ?? []);
                 $this->saveRelatedData($analisis->monitoringSuggestions(), $data['potential_considerations']['monitoring_suggestions'] ?? []);
                 $this->saveRelatedData($analisis->patternImplications(), $data['potential_considerations']['pattern_implications'] ?? []);
@@ -98,7 +101,7 @@ class AnalisisHargaController extends Controller {
                 $this->saveRelatedData($analisis->dataConstraints(), $data['analysis_limitations']['data_constraints'] ?? []);
                 $this->saveRelatedData($analisis->assumptionsMade(), $data['analysis_limitations']['assumptions_made'] ?? []);
 
-                $results[] = "Analisis untuk '{$komoditas->nama}' berhasil disimpan.";
+                $results[] = "Analisis untuk '{$komoditas->nama}' pada tanggal {$analysisDate} berhasil diproses (dibuat/diperbarui).";
             }
 
             // Jika ada error (misal komoditas tidak ditemukan), batalkan semua operasi database
