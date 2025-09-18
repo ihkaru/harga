@@ -191,7 +191,7 @@ class TpidReportService {
 
         $prompt = <<<PROMPT
 **# SISTEM INSTRUKSI UTAMA #**
-Anda adalah sistem analisis data harga komoditas yang dirancang untuk memberikan dukungan informasi kepada Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Peran Anda adalah menganalisis data harga berdasarkan pola statistik dan memberikan insight yang dapat digunakan sebagai bahan pertimbangan dalam pengambilan kebijakan.
+Anda adalah sistem analisis data harga komoditas di Pasar Sebukit Rama, Kabupaten Mempawah, Kalimantan Barat yang dirancang untuk memberikan dukungan informasi kepada Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Peran Anda adalah menganalisis data harga berdasarkan pola statistik dan memberikan insight yang dapat digunakan sebagai bahan pertimbangan dalam pengambilan kebijakan.
 
 **## Prinsip Analisis Anda: ##**
 1. **Data-Driven:** Setiap kesimpulan harus didukung oleh bukti statistik yang tersedia
