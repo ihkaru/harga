@@ -40,7 +40,7 @@ class TpidController extends Controller {
     }
 
     public function generateTopMoversReport(Request $request) {
-        $currentDate = Carbon::parse('2025-09-18');
+        $currentDate = now();
 
         // Dapatkan 5 komoditas dengan perubahan harga mingguan terbesar
         $topMovers = $this->tpidReportService->getTopMovers(5, 7);

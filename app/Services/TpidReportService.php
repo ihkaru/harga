@@ -27,7 +27,7 @@ class TpidReportService {
         $allPrices = Harga::whereIn('id_komoditas', Komoditas::pluck('id_komoditas'))
             ->orderBy('id_komoditas')
             ->orderByRaw("STR_TO_DATE(tanggal, '%d/%m/%Y') DESC") // <-- Order berdasarkan tanggal yang dikonversi
-            ->limit(40 * 100) // Ambil cukup data untuk setiap komoditas
+            // ->limit(40 * 100) // Ambil cukup data untuk setiap komoditas
             ->get();
 
         if ($allPrices->isEmpty()) {
@@ -56,6 +56,9 @@ class TpidReportService {
             });
 
             $komoditas = $allCommodities->get($id_komoditas);
+            // dump($allCommodities->get($id_komoditas)->nama);
+
+
 
             if ($komoditas && $comparisonPriceRecord && $comparisonPriceRecord->harga > 0) {
                 $latestPrice = (float) $latestPriceRecord->harga;
