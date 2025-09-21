@@ -113,6 +113,7 @@ class HargaService
         foreach ($chunks as $chunk) {
             Harga::insert($chunk);
         }
+        Harga::where('harga', '=', 0)->delete();
         Harga::whereNull("harga")->delete();
     }
 }

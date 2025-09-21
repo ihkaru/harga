@@ -13,10 +13,8 @@ use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\Request;
 
-class KomoditasController extends Controller
-{
-    public function show($idKomoditas)
-    {
+class KomoditasController extends Controller {
+    public function show($idKomoditas) {
         // dd($idKomoditas);
         $komoditas = Komoditas::where('id_komoditas', $idKomoditas)->with(['hargas'])->first();
         if ($komoditas) {
@@ -24,8 +22,7 @@ class KomoditasController extends Controller
         }
         return response(status: 404);
     }
-    public function index()
-    {
+    public function index() {
         # Cek data terakhir yang masuk ke database
         // SP2KPService::updateLatestData();
         $data = Komoditas::with(['hargas' => function ($query) {
@@ -37,8 +34,7 @@ class KomoditasController extends Controller
         }
         return response()->json($data);
     }
-    public function updateKomoditas()
-    {
+    public function updateKomoditas() {
         $komoditasService = new KomoditasService();
         $hargaService = new HargaService();
 
@@ -51,6 +47,7 @@ class KomoditasController extends Controller
             if (config('app.pull_from_sp2kp')) {
                 SP2KPService::updateLatestData();
             }
+            Harga::where('harga', 0)->delete();
             try {
                 $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
             } catch (Exception $e) {
