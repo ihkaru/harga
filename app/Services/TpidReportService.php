@@ -506,8 +506,7 @@ PROMPT;
     }
 
     /**
-     * Helper method untuk informasi musim dengan periode Pancaroba berdasarkan
-     * prediksi terkini dari BMKG (musim hujan datang lebih awal).
+     * Helper method untuk informasi musim berdasarkan prediksi BMKG terkini.
      *
      * @param \Carbon\Carbon $date
      * @return string
@@ -515,31 +514,28 @@ PROMPT;
     private function getMusimInfo(Carbon $date): string {
         $month = $date->month;
 
-        // Musim Hujan dimulai lebih awal: Agustus sampai dengan April
-        // Puncak hujan di Kalimantan: November - Desember
-
-        // Pancaroba I: Peralihan Musim Kemarau ke Musim Hujan (Agustus – September)
-        if ($month >= 8 && $month <= 9) {
-            return "Musim Peralihan/Pancaroba I (Kemarau ke Hujan). Musim hujan mulai datang; hujan mulai meningkat, potensi hujan lokal, angin kencang dan ancaman cuaca ekstrem lokal.";
+        // Pancaroba I: Peralihan dari Musim Hujan ke Kemarau (sekitar April – Mei)
+        if ($month >= 4 && $month <= 5) {
+            return "Musim Peralihan I (Hujan ke Kemarau). Curah hujan mulai menurun; potensi cuaca tidak menentu, ancaman kekeringan lokal, dan risiko hama penyakit tanaman.";
         }
 
-        // Musim Hujan: Puncak (Oktober – Desember)
-        if ($month >= 10 && $month <= 12) {
-            return "Musim Hujan (Puncak). Curah hujan tinggi, risiko banjir, genangan, tanah longsor, dan gangguan transportasi/logistik.";
+        // Musim Kemarau: bulan puncak kemarau (biasanya Juni – Agustus)
+        if ($month >= 6 && $month <= 8) {
+            return "Musim Kemarau. Curah hujan rendah; potensi kekeringan, meningkatnya risiko kebakaran hutan dan lahan, suhu udara tinggi, kebutuhan air meningkat.";
         }
 
-        // Musim Hujan: Lanjut (Januari – April)
-        if ($month >= 1 && $month <= 4) {
-            return "Musim Hujan (Lanjutan). Tetap basah; perhatian terhadap curah hujan tinggi dan fenomena cuaca ekstrem.";
+        // Puncak nearing akhir Musim Kemarau → peralihan ke hujan
+        if ($month == 9) {
+            return "Pancaroba (Kemarau ke Hujan). Curah hujan mulai meningkat; potensi hujan lokal/lebat, gangguan pengeringan, kesiapsiagaan banjir diperlukan.";
         }
 
-        // Pancaroba II: Peralihan dari Musim Hujan ke Kemarau (Mei – Juli)
-        if ($month >= 5 && $month <= 7) {
-            return "Musim Peralihan/Pancaroba II (Hujan ke Kemarau). Pelan-pelan curah hujan mulai menurun, risiko hujan sporadis/ekstrem lokal, pemeliharaan saluran air & drainase penting.";
+        // Musim Hujan: mulai Oktober sampai sekitar April
+        if ($month >= 10 || $month <= 4) {
+            return "Musim Hujan. Curah hujan tinggi; risiko banjir, genangan, tanah longsor, gangguan transportasi dan logistik.";
         }
 
-        // Fallback
-        return "Data musim tidak tersedia untuk bulan ini.";
+        // Fallback jika ada bulan yang tidak sesuai logika di atas
+        return "Data musim untuk bulan ini belum tersedia / dalam masa transisi.";
     }
 
 
