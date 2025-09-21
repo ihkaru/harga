@@ -275,7 +275,6 @@ class TpidReportService {
         $cvText = number_format($stats['cv_percentage'], 2) . '%'; // Sumbernya sekarang dari $stats
         $dynamicThresholdUsedFormatted = number_format($stats['dynamic_threshold_used'], 2) . '%';
 
-        dd($volatilityIndexFormatted, $cvText, $dynamicThresholdUsedFormatted);
 
         $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         $priceHistoryJson = !empty($stats['price_history_7d']) ? json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : 'N/A';
