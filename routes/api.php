@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AnalysisFeedbackController;
 use App\Http\Controllers\Api\AnalisisHargaController;
 use App\Http\Controllers\HargaController;
 use App\Http\Controllers\KomoditasController;
@@ -62,3 +63,5 @@ Route::post('/analisis-harga', [AnalisisHargaController::class, 'store']);
 
 // Endpoint untuk mengambil data untuk frontend (GET)
 Route::get('/analisis-harga', [AnalisisHargaController::class, 'index']);
+
+Route::post('/analysis-feedback', [AnalysisFeedbackController::class, 'store']);

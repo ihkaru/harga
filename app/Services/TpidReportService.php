@@ -6,9 +6,18 @@ use App\Models\Harga;
 use App\Models\Komoditas;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class TpidReportService {
+
+    // 1. TAMBAHKAN DEPENDENSI WeatherService
+    protected $weatherService;
+
+    public function __construct(WeatherService $weatherService) {
+        $this->weatherService = $weatherService;
+    }
 
     /**
      * PERBAIKAN: Fungsi ini dioptimalkan untuk menghindari N+1 Query.
@@ -83,20 +92,16 @@ class TpidReportService {
      * dan diurutkan dengan benar.
      */
     public function generateTpidAnalysisPrompt(Komoditas $komoditas, Carbon $currentDate): string {
-        // Ambil semua data dan lakukan sorting di level collection.
-        // Ini kurang efisien dibanding sorting di DB, tapi lebih aman untuk format tanggal string.
+        // ... (logika pengambilan data harga tetap sama) ...
         $allPricesForCommodity = Harga::where('id_komoditas', $komoditas->id_komoditas)->get();
 
         $prices = $allPricesForCommodity
             ->sortBy(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal))
-            ->slice(-90); // Ambil 90 data terakhir
+            ->slice(-90);
 
         if ($prices->count() < 2) {
-            // PERBAIKAN: Kembalikan JSON error yang konsisten, bukan string.
             return json_encode(['error' => "Data untuk komoditas {$komoditas->nama} tidak cukup untuk dianalisis."]);
         }
-
-        // PERBAIKAN: Pastikan data terakhir tidak null sebelum diteruskan.
         $lastData = $prices->last();
         if (!$lastData) {
             return json_encode(['error' => "Gagal mendapatkan data terakhir untuk {$komoditas->nama}."]);
@@ -104,7 +109,67 @@ class TpidReportService {
 
         $statistics = $this->calculateStatistics($prices);
 
-        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal);
+        // 2. AMBIL DATA CUACA DI SINI
+        $weatherContext = $this->getWeatherContext();
+
+
+        // 3. PASS DATA CUACA KE buildPrompt
+        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal, $weatherContext);
+    }
+
+    /**
+     * FUNGSI BARU (YANG DIPERBAIKI): Mengambil dan menyusun konteks cuaca
+     * dengan implementasi CACHING untuk menghindari timeout.
+     */
+    private function getWeatherContext(): array {
+        $mempawahCoords = config('tpid.locations.mempawah');
+        $kalbarCoords = config('tpid.locations.kalbar_regional');
+        $cacheDuration = now()->addHours(6); // Simpan data cuaca selama 6 jam
+
+        $weatherContext = [
+            'konteks_cuaca_mempawah' => null,
+            'konteks_cuaca_kalbar' => null,
+        ];
+
+        // --- Ambil data untuk Mempawah DENGAN CACHE ---
+        $mempawahCacheKey = 'weather_' . Str::slug($mempawahCoords['name']) . '_' . now()->toDateString();
+
+        $mempawahData = Cache::remember($mempawahCacheKey, $cacheDuration, function () use ($mempawahCoords) {
+            return $this->weatherService->getHistoricalWeatherSummary($mempawahCoords['latitude'], $mempawahCoords['longitude']);
+        });
+
+        if ($mempawahData) {
+            $weatherContext['konteks_cuaca_mempawah'] = [
+                'level' => $mempawahCoords['name'],
+                'ringkasan_data' => $mempawahData,
+            ];
+        }
+
+        // --- Ambil data untuk Regional Kalbar DENGAN CACHE ---
+        $regionalData = [];
+        foreach ($kalbarCoords as $key => $coords) {
+            $regionalCacheKey = 'weather_' . Str::slug($coords['name']) . '_' . now()->toDateString();
+
+            $data = Cache::remember($regionalCacheKey, $cacheDuration, function () use ($coords) {
+                return $this->weatherService->getHistoricalWeatherSummary($coords['latitude'], $coords['longitude']);
+            });
+
+            if ($data) {
+                $regionalData[] = [
+                    'lokasi' => $coords['name'],
+                    'ringkasan_data' => $data,
+                ];
+            }
+        }
+
+        if (!empty($regionalData)) {
+            $weatherContext['konteks_cuaca_kalbar'] = [
+                'level' => 'Provinsi Kalimantan Barat (Regional)',
+                'data_per_lokasi' => $regionalData,
+            ];
+        }
+
+        return $weatherContext;
     }
 
 
@@ -142,6 +207,14 @@ class TpidReportService {
             $mean = $average; // Sudah dihitung
             $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $count);
         }
+        // --- TAMBAHAN BARU: EKSTRAK RIWAYAT HARGA 7 HARI TERAKHIR ---
+        $priceHistory7d = $prices->slice(-7)->map(function ($price) {
+            return [
+                'tanggal' => $price->tanggal,
+                'harga' => (int) $price->harga,
+            ];
+        })->values()->all(); // `values()` untuk mereset keys array menjadi 0, 1, 2, ...
+
 
         return [
             'latest_price' => $latestPrice,
@@ -152,20 +225,21 @@ class TpidReportService {
             'max_90d' => $max ?: 0,
             'min_90d' => $min ?: 0,
             'volatility_90d' => $stdDev,
+            'price_history_7d' => $priceHistory7d, // <-- DATA BARU DITAMBAHKAN DI SINI
         ];
     }
 
     /**
-     * Membangun string prompt yang diperkaya dengan konteks "Strategic Playbook"
-     * untuk menghasilkan analisis dukungan kebijakan yang mendalam dalam format JSON.
+     * PERBAIKAN: Signature method diubah dan prompt diperkaya dengan data cuaca.
      *
      * @param Komoditas $komoditas
      * @param array $stats
      * @param Carbon $currentDate
      * @param string $lastDataDate
+     * @param array $weatherContext <--- PARAMETER BARU
      * @return string
      */
-    private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate): string {
+    private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate, array $weatherContext): string {
         // Persiapan variabel dengan validasi dan formatting yang lebih robust
         $dailyChangeText = is_numeric($stats['change_daily']) ? number_format($stats['change_daily'], 2) . '%' : 'N/A';
         $weeklyChangeText = is_numeric($stats['change_weekly']) ? number_format($stats['change_weekly'], 2) . '%' : 'N/A';
@@ -177,10 +251,14 @@ class TpidReportService {
         $volatility90dFormatted = number_format($stats['volatility_90d'], 0, ',', '.');
 
         // Kalkulasi tambahan untuk memberikan konteks yang lebih kaya
-        $priceToAvgRatio = ($stats['latest_price'] / $stats['average_90d']) * 100;
+        $priceToAvgRatio = ($stats['average_90d'] > 0) ? ($stats['latest_price'] / $stats['average_90d']) * 100 : 0;
         $priceToAvgText = number_format($priceToAvgRatio - 100, 2) . '%';
-        $coefficientOfVariation = ($stats['volatility_90d'] / $stats['average_90d']) * 100;
+        $coefficientOfVariation = ($stats['average_90d'] > 0) ? ($stats['volatility_90d'] / $stats['average_90d']) * 100 : 0;
         $cvText = number_format($coefficientOfVariation, 2) . '%';
+
+        // 4. FORMAT DATA CUACA UNTUK DIMASUKKAN KE PROMPT
+        // Gunakan JSON_PRETTY_PRINT agar mudah dibaca oleh LLM
+        $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
         // Kategorisasi komoditas untuk konteks yang lebih tepat
         $kategoriKomoditas = $this->getKategoriKomoditas($komoditas->nama);
@@ -192,40 +270,48 @@ class TpidReportService {
         $musimInfo = $this->getMusimInfo($currentDate);
         $hbknTerdekat = $this->getHBKNTerdekat($currentDate);
 
+        // --- TAMBAHAN BARU: FORMAT RIWAYAT HARGA SEBAGAI JSON ---
+        $priceHistoryJson = 'N/A';
+        if (!empty($stats['price_history_7d'])) {
+            $priceHistoryJson = json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        }
+
         $prompt = <<<PROMPT
 **# SISTEM INSTRUKSI UTAMA #**
-Anda adalah sistem analisis data harga komoditas di Pasar Sebukit Rama, Kabupaten Mempawah, Kalimantan Barat yang dirancang untuk memberikan dukungan informasi kepada Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Peran Anda adalah menganalisis data harga berdasarkan pola statistik dan memberikan insight yang dapat digunakan sebagai bahan pertimbangan dalam pengambilan kebijakan.
+Anda adalah "Analis Kontekstual", sebuah AI yang dirancang untuk memberikan dukungan keputusan kepada Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Peran Anda adalah mengubah data harga mentah menjadi wawasan strategis yang sadar konteks, memberdayakan, dan transparan.
 
-**## Prinsip Analisis Anda: ##**
-1. **Data-Driven:** Setiap kesimpulan harus didukung oleh bukti statistik yang tersedia
-2. **Context-Aware:** Pertimbangkan faktor musiman, geografis, dan pola historis
-3. **Objective Analysis:** Berikan analisis objektif berdasarkan data tanpa asumsi kondisi eksternal
-4. **Decision Support:** Analisis sebagai bahan pertimbangan, bukan keputusan final
-
-**PENTING:** Analisis yang Anda berikan adalah dukungan informasi untuk pengambilan keputusan, bukan rekomendasi resmi atau tindakan yang harus dilakukan. Semua keputusan kebijakan tetap menjadi wewenang dan tanggung jawab TPID dan instansi terkait.
+**## Prinsip Panduan Anda: ##**
+1.  **Konteks di Atas Prediksi:** Fokus pada **konteks** historis dan kelembagaan, bukan prediksi absolut.
+2.  **Pertanyaan yang Memberdayakan, Bukan Jawaban yang Mendikte:** Sajikan **"pertanyaan untuk dipertimbangkan"** atau **"poin untuk dimonitor"**, bukan rekomendasi kaku.
+3.  **Transparansi adalah Kunci:** Secara proaktif komunikasikan keterbatasan analisis (misal: "Analisis ini hanya berdasarkan data Pasar Sebukit Rama").
+4.  **Manusia sebagai Pusat (Human-in-the-Loop):** Anda adalah alat bantu untuk analis manusia, bukan pengganti.
 
 ---
-**# BAGIAN 1: KNOWLEDGE BASE ANALISIS HARGA #**
+**# BAGIAN 1: KNOWLEDGE BASE STRATEGIS TPID #**
 
-**## 1.1. Katalog Pola Perubahan Harga ##**
+**## 1.1. Framework Analisis 4 Lapis (Wajib Digunakan) ##**
+Anda harus menstrukturkan analisis Anda melalui empat lapisan ini:
+1.  **Pattern Recognition:** Identifikasi anomali, tren, dan volatilitas dalam data. (Ini adalah output dasar Anda).
+2.  **Causal Analysis (Hipotesis):** Berdasarkan pola data dan konteks musiman, berikan **hipotesis** kemungkinan penyebabnya. Contoh: "Kenaikan tajam dan cepat saat musim hujan mengindikasikan *supply-side shock*."
+3.  **Impact Projection (Pembingkaian):** Kaitkan pergerakan harga dengan potensi dampaknya bagi masyarakat. Contoh: "Sebagai komoditas pokok, kenaikan harga beras berpotensi signifikan mempengaruhi daya beli masyarakat berpenghasilan rendah."
+4.  **Intervention Strategy Framing (Pemberdayaan):** Rumuskan **PERTANYANAN KUNCI** yang relevan untuk stakeholder, bukan rekomendasi. Tujuannya adalah memicu diskusi dan verifikasi.
 
-**### A. Faktor Internal Pasar ###**
-* **Pola Musiman:** Variasi harga akibat siklus panen, musim hujan/kemarau, pola konsumsi tradisional
-* **Pola Mingguan:** Fluktuasi harga berdasarkan hari pasar, weekend effect, siklus distribusi
-* **Volatilitas Normal:** Rentang perubahan harga yang masih dalam batas wajar berdasarkan karakteristik komoditas
+**## 1.2. Konteks Kelembagaan TPID (Pemetaan Stakeholder) ##**
+Gunakan pemetaan ini untuk menghasilkan pertimbangan yang relevan:
+*   **Koordinator TPID (Sekda/Ketua):** Fokus pada gambaran besar, koordinasi lintas-sektor, dan implikasi kebijakan secara umum. Pertanyaan untuk mereka harus bersifat strategis.
+*   **Dinas Perdagangan:** Fokus pada stabilitas pasokan, kelancaran distribusi, dan operasi pasar. Pertanyaan untuk mereka harus seputar stok, harga di tingkat distributor, dan anomali di rantai pasok.
+*   **Dinas Pertanian:** Fokus pada produksi, musim tanam/panen, dan kesehatan tanaman. Pertanyaan untuk mereka harus seputar kondisi di tingkat petani, potensi gagal panen, dan faktor-faktor produksi.
 
-**### B. Indikator Statistik Kunci ###**
-* **Tren Pergerakan:** Analisis perubahan harga harian, mingguan, dan bulanan
-* **Deviasi dari Rata-rata:** Posisi harga saat ini terhadap rata-rata historis
-* **Volatilitas:** Tingkat fluktuasi harga dalam periode tertentu
-* **Coefficient of Variation:** Ukuran volatilitas relatif terhadap rata-rata harga
+**## 1.3. Katalog Efektivitas Intervensi (Sebagai "Contekan") ##**
+Gunakan ini untuk membingkai pertanyaan yang lebih cerdas:
+*   **Operasi Pasar:** Efektif untuk stabilisasi jangka pendek (5-15% dalam 1-2 minggu) jika volume dan waktu tepat.
+*   **Penetapan HET:** Berhasil jika ada penegakan yang kuat, namun berisiko menciptakan pasar gelap.
+*   **Intervensi Rantai Pasok (misal: subsidi transportasi):** Dampak bisa lebih lama, namun memerlukan investasi lebih besar.
 
-**### C. Pola Harga Berdasarkan Jenis Komoditas ###**
-* **Komoditas Pokok:** Biasanya memiliki volatilitas rendah, perubahan gradual
-* **Komoditas Volatil:** Fluktuasi harga tinggi, sensitif terhadap faktor eksternal
-* **Komoditas Musiman:** Pola perubahan mengikuti siklus musiman yang dapat diprediksi
+---
+**# BAGIAN 1B: KNOWLEDGE BASE ANALISIS HARGA (UNTUK KOMPATIBILITAS) #**
 
-**## 1.2. Framework Klasifikasi Kondisi Harga ##**
+**## 1B.1. Framework Klasifikasi Kondisi Harga ##**
 
 **### Level 1: STABIL ###**
 * **Kriteria:** Pergerakan harga dalam rentang normal
@@ -265,11 +351,10 @@ Anda adalah sistem analisis data harga komoditas di Pasar Sebukit Rama, Kabupate
   - Harga >20% di atas/bawah rata-rata
   - Volatilitas melampaui batas historis
 
-**## 1.3. Konteks Regional Kabupaten Mempawah ##**
-* **Geografis:** Daerah pesisir dengan karakteristik iklim tropis
-* **Akses Distribusi:** Ketergantungan pada jalur darat dan laut
-* **Karakteristik Pasar:** Pasar tradisional dengan pola distribusi lokal
-* **Faktor Musiman:** Pengaruh musim hujan dan kemarau terhadap produksi dan distribusi
+**## 1B.2. Analysis Confidence Criteria ##**
+- **HIGH:** Data lengkap, pola jelas, statistik signifikan
+- **MEDIUM:** Data cukup, pola terlihat, beberapa keterbatasan
+- **LOW:** Data terbatas, pola tidak jelas, banyak keterbatasan
 
 ---
 **# BAGIAN 2: DATA UNTUK ANALISIS #**
@@ -283,141 +368,115 @@ Anda adalah sistem analisis data harga komoditas di Pasar Sebukit Rama, Kabupate
 - **Konteks Musiman:** {$musimInfo}
 - **HBKN Terdekat:** {$hbknTerdekat}
 
-**## Data Harga dan Statistik ##**
+**## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
+{$weatherContextJson}
 
-**### A. Kondisi Harga Terkini ###**
+**## Data Harga dan Statistik (90 Hari Terakhir) ##**
 - **Harga Saat Ini:** Rp {$latestPriceFormatted}
-- **Posisi terhadap Rata-rata:** {$priceToAvgText} dari rata-rata 90 hari
-
-**### B. Dinamika Perubahan ###**
 - **Perubahan Harian:** {$dailyChangeText}
 - **Perubahan Mingguan:** {$weeklyChangeText}
 - **Perubahan Bulanan:** {$monthlyChangeText}
-
-**### C. Profil Statistik 90 Hari Terakhir ###**
+- **Posisi thd. Rata-rata:** {$priceToAvgText}
 - **Rata-rata Harga:** Rp {$average90dFormatted}
 - **Harga Tertinggi:** Rp {$max90dFormatted}
 - **Harga Terendah:** Rp {$min90dFormatted}
 - **Volatilitas (Std Dev):** Rp {$volatility90dFormatted}
 - **Coefficient of Variation:** {$cvText}
 
+**## Riwayat Harga (7 Hari Terakhir) ##**
+{$priceHistoryJson}
+
 ---
-**# BAGIAN 3: INSTRUKSI OUTPUT #**
+**# BAGIAN 3: INSTRUKSI OUTPUT JSON v2.0 #**
 
-Berdasarkan analisis data statistik yang tersedia, berikan output dalam format **JSON murni** dengan struktur sebagai berikut:
+**TUGAS ANDA:** Berdasarkan **Knowledge Base** di Bagian 1 dan **Data** di Bagian 2, hasilkan output dalam format **JSON MURNI** dengan struktur v2.0 di bawah ini. Pastikan setiap field terisi sesuai dengan prinsip dan panduan yang diberikan.
 
-**## Schema JSON Output ##**
 ```json
 {
-  "metadata": {
-    "commodity_name": "string",
-    "commodity_category": "string (POKOK/PENTING/VOLATIL)",
-    "analysis_date": "string (format: YYYY-MM-DD)",
-    "data_freshness": "string (format: YYYY-MM-DD)",
-    "analysis_confidence": "string (HIGH/MEDIUM/LOW)"
-  },
-  "price_condition_assessment": {
-    "condition_level": "string (STABIL/FLUKTUATIF/BERGEJOLAK/EKSTREM)",
-    "volatility_index": "number (0-100)",
-    "trend_direction": "string (NAIK/TURUN/SIDEWAYS)",
-    "statistical_significance": "string (SIGNIFIKAN/NORMAL/TIDAK_SIGNIFIKAN)",
-    "key_observation": "string (observasi utama dari data)"
-  },
-  "data_insights": {
-    "current_position": "string (posisi harga saat ini relatif terhadap historis)",
-    "price_pattern": "string (pola yang teridentifikasi dari data)",
-    "volatility_analysis": "string (analisis tingkat volatilitas)",
-    "trend_analysis": "string (analisis tren berdasarkan data)"
-  },
-  "statistical_findings": {
-    "deviation_from_average": {
-      "percentage": "number",
-      "interpretation": "string"
+    "metadata": {
+        "commodity_name": "string",
+        "commodity_category": "string (POKOK/PENTING/VOLATIL)",
+        "analysis_date": "string (format: YYYY-MM-DD)",
+        "data_freshness": "string (format: YYYY-MM-DD)",
+        "analysis_confidence": "string (HIGH/MEDIUM/LOW)"
     },
-    "volatility_assessment": {
-      "level": "string (RENDAH/SEDANG/TINGGI/SANGAT_TINGGI)",
-      "cv_interpretation": "string"
+    "price_condition_assessment": {
+        "condition_level": "string (STABIL/FLUKTUATIF/BERGEJOLAK/EKSTREM)",
+        "volatility_index": "number (0-100)",
+        "trend_direction": "string (NAIK/TURUN/SIDEWAYS)",
+        "statistical_significance": "string (SIGNIFIKAN/NORMAL/TIDAK_SIGNIFIKAN)",
+        "key_observation": "string (observasi utama dari data)"
     },
-    "trend_strength": {
-      "strength": "string (LEMAH/SEDANG/KUAT)",
-      "consistency": "string (KONSISTEN/TIDAK_KONSISTEN)"
+    "data_insights": {
+        "current_position": "string (posisi harga saat ini relatif terhadap historis)",
+        "price_pattern": "string (pola yang teridentifikasi dari data)",
+        "volatility_analysis": "string (analisis tingkat volatilitas)",
+        "trend_analysis": "string (analisis tren berdasarkan data)"
+    },
+    "statistical_findings": {
+        "deviation_from_average": {
+            "percentage": "number",
+            "interpretation": "string"
+        },
+        "volatility_assessment": {
+            "level": "string (RENDAH/SEDANG/TINGGI/SANGAT_TINGGI)",
+            "cv_interpretation": "string"
+        },
+        "trend_strength": {
+            "strength": "string (LEMAH/SEDANG/KUAT)",
+            "consistency": "string (KONSISTEN/TIDAK_KONSISTEN)"
+        }
+    },
+    "strategic_analysis": {
+        "causal_hypothesis": "string (Hipotesis utama penyebab pergerakan harga berdasarkan pola data dan konteks musiman)",
+        "potential_impact_framing": "string (Penjelasan singkat mengenai potensi signifikansi pergerakan harga ini bagi masyarakat lokal)"
+    },
+    "stakeholder_specific_considerations": {
+        "for_dinas_perdagangan": "string (Pertanyaan kunci atau poin monitor yang relevan untuk Dinas Perdagangan)",
+        "for_dinas_pertanian": "string (Pertanyaan kunci atau poin monitor yang relevan untuk Dinas Pertanian)",
+        "for_koordinator_tpid": "string (Poin diskusi tingkat tinggi yang relevan untuk Ketua/Koordinator TPID)"
+    },
+    "potential_considerations": {
+        "data_based_alerts": [
+            "string (peringatan berdasarkan pola data)"
+        ],
+        "monitoring_suggestions": [
+            "string (saran pemantauan berdasarkan analisis)"
+        ],
+        "pattern_implications": [
+            "string (implikasi dari pola yang teridentifikasi)"
+        ]
+    },
+    "information_support": {
+        "key_metrics_to_watch": [
+            "string (metrik kunci yang perlu dipantau)"
+        ],
+        "data_quality_notes": [
+            "string (catatan tentang kualitas data)"
+        ],
+        "additional_data_suggestions": [
+            "string (saran data tambahan yang mungkin diperlukan)"
+        ]
+    },
+    "forward_indicators": {
+        "short_term_outlook": "string (indikasi berdasarkan data untuk 1-7 hari)",
+        "pattern_sustainability": "string (keberlanjutan pola berdasarkan data historis)",
+        "statistical_warnings": [
+            "string (peringatan statistik berdasarkan pola data)"
+        ]
+    },
+    "analysis_limitations": {
+        "data_constraints": [
+            "string (keterbatasan data yang mempengaruhi analisis)"
+        ],
+        "assumptions_made": [
+            "string (asumsi yang dibuat dalam analisis)"
+        ],
+        "external_factors_note": "string (catatan bahwa faktor eksternal tidak dianalisis)"
     }
-  },
-  "potential_considerations": {
-    "data_based_alerts": [
-      "string (peringatan berdasarkan pola data)"
-    ],
-    "monitoring_suggestions": [
-      "string (saran pemantauan berdasarkan analisis)"
-    ],
-    "pattern_implications": [
-      "string (implikasi dari pola yang teridentifikasi)"
-    ]
-  },
-  "information_support": {
-    "key_metrics_to_watch": [
-      "string (metrik kunci yang perlu dipantau)"
-    ],
-    "data_quality_notes": [
-      "string (catatan tentang kualitas data)"
-    ],
-    "additional_data_suggestions": [
-      "string (saran data tambahan yang mungkin diperlukan)"
-    ]
-  },
-  "forward_indicators": {
-    "short_term_outlook": "string (indikasi berdasarkan data untuk 1-7 hari)",
-    "pattern_sustainability": "string (keberlanjutan pola berdasarkan data historis)",
-    "statistical_warnings": [
-      "string (peringatan statistik berdasarkan pola data)"
-    ]
-  },
-  "analysis_limitations": {
-    "data_constraints": [
-      "string (keterbatasan data yang mempengaruhi analisis)"
-    ],
-    "assumptions_made": [
-      "string (asumsi yang dibuat dalam analisis)"
-    ],
-    "external_factors_note": "string (catatan bahwa faktor eksternal tidak dianalisis)"
-  }
 }
 ```
-
-**## Panduan Analisis ##**
-
-**### 1. Fokus pada Data ###**
-- Analisis hanya berdasarkan data statistik yang tersedia
-- Hindari spekulasi tentang faktor eksternal yang tidak terdokumentasi dalam data
-- Berikan interpretasi objektif dari pola statistik
-
-**### 2. Bahasa dan Tone ###**
-- Gunakan bahasa formal namun mudah dipahami
-- Hindari klaim yang bersifat prediktif absolut
-- Fokus pada "indikasi" dan "kemungkinan" berdasarkan data
-
-**### 3. Posisi Sebagai Decision Support ###**
-- Tekankan bahwa analisis adalah "dukungan informasi"
-- Hindari memberikan "rekomendasi" langsung
-- Gunakan frasa seperti "data menunjukkan", "pola mengindikasikan", "berdasarkan statistik"
-
-**### 4. Kualitas Output ###**
-- Pastikan semua field terisi dengan informasi relevan
-- Gunakan "Tidak tersedia" jika data tidak mencukupi
-- Validasi sintaks JSON sebelum output
-
-**### 5. Analysis Confidence Criteria ###**
-- **HIGH:** Data lengkap, pola jelas, statistik signifikan
-- **MEDIUM:** Data cukup, pola terlihat, beberapa keterbatasan
-- **LOW:** Data terbatas, pola tidak jelas, banyak keterbatasan
-
-**## CATATAN PENTING ##**
-- Output HANYA dalam format JSON murni tanpa tambahan teks
-- Analisis bersifat deskriptif berdasarkan data, bukan preskriptif
-- Semua kesimpulan harus dapat ditelusuri kembali ke data yang disediakan
-- Hindari menggunakan istilah yang mengimplikasikan kepastian absolut tentang kondisi masa depan
-
-HASILKAN JSON OUTPUT BERDASARKAN DATA YANG TERSEDIA:
+HASILKAN HANYA JSON OUTPUT MURNI BERDASARKAN INSTRUKSI DI ATAS.
 PROMPT;
 
         return $prompt;

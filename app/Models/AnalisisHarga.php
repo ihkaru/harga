@@ -58,4 +58,14 @@ class AnalisisHarga extends Model {
     public function assumptionsMade(): HasMany {
         return $this->hasMany(AnalisisAssumptionsMade::class);
     }
+
+    public function strategicAnalysis(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(AnalisisStrategicAnalysis::class);
+    }
+
+    public function stakeholderConsiderations(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(AnalisisStakeholderConsideration::class);
+    }
 }

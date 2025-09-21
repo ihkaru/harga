@@ -34,5 +34,10 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+    // dalam file config/services.php
+    'weather_api' => [
+        'key' => env('WEATHER_API_KEY'),
+        'url' => 'https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline',
+    ],
 
 ];

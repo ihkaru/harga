@@ -90,6 +90,20 @@ class AnalisisHargaController extends Controller {
                 $analisis->dataConstraints()->delete();
                 $analisis->assumptionsMade()->delete();
 
+                // [TAMBAHAN] Simpan data untuk relasi HasOne yang baru
+                if (isset($data['strategic_analysis'])) {
+                    $analisis->strategicAnalysis()->updateOrCreate(
+                        ['analisis_harga_id' => $analisis->id],
+                        $data['strategic_analysis']
+                    );
+                }
+
+                if (isset($data['stakeholder_specific_considerations'])) {
+                    $analisis->stakeholderConsiderations()->updateOrCreate(
+                        ['analisis_harga_id' => $analisis->id],
+                        $data['stakeholder_specific_considerations']
+                    );
+                }
 
                 $this->saveRelatedData($analisis->dataBasedAlerts(), $data['potential_considerations']['data_based_alerts'] ?? []);
                 $this->saveRelatedData($analisis->monitoringSuggestions(), $data['potential_considerations']['monitoring_suggestions'] ?? []);
@@ -176,6 +190,8 @@ class AnalisisHargaController extends Controller {
         // Kita tetap memuat semua relasi yang dibutuhkan oleh frontend
         $query = AnalisisHarga::with([
             'komoditas',
+            'strategicAnalysis',
+            'stakeholderConsiderations',
             'dataBasedAlerts',
             'monitoringSuggestions',
             'patternImplications',
