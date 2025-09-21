@@ -11,6 +11,15 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 
 class AnalisisHargaController extends Controller {
+
+    /**
+     * Normalisasi nama komoditas untuk mengatasi inkonsistensi spasi
+     */
+    private function normalizeCommodityName($name) {
+        // Hilangkan spasi berlebihan dan normalisasi spasi di sekitar koma
+        return preg_replace('/\s*,\s*/', ',', trim($name));
+    }
+
     /**
      * Menerima dan menyimpan data analisis harga dari n8n.
      * Endpoint ini dirancang untuk menerima satu panggilan API dengan
@@ -24,7 +33,7 @@ class AnalisisHargaController extends Controller {
         $validator = Validator::make($request->all(), [
             'data' => 'required|array',
             'data.*.metadata.commodity_name' => 'required|string|max:255',
-            'data.*.metadata.analysis_date' => 'required|date_format:Y-m-d', // Validasi tanggal juga penting
+            'data.*.metadata.analysis_date' => 'required|date_format:Y-m-d',
         ]);
 
         if ($validator->fails()) {
@@ -37,24 +46,40 @@ class AnalisisHargaController extends Controller {
         DB::beginTransaction();
         try {
             foreach ($request->input('data') as $data) {
-                $komoditas = Komoditas::where('nama', $data['metadata']['commodity_name'])->first();
+                $originalCommodityName = $data['metadata']['commodity_name'];
+                $normalizedCommodityName = $this->normalizeCommodityName($originalCommodityName);
+
+                // Cari komoditas dengan nama yang sudah dinormalisasi
+                $komoditas = Komoditas::where('nama', $normalizedCommodityName)->first();
+
+                // Jika tidak ditemukan dengan nama yang dinormalisasi, coba cari dengan nama asli
+                if (!$komoditas) {
+                    $komoditas = Komoditas::where('nama', $originalCommodityName)->first();
+                }
+
+                // Jika masih tidak ditemukan, coba dengan fuzzy matching
+                if (!$komoditas) {
+                    $komoditas = Komoditas::where(
+                        'nama',
+                        'LIKE',
+                        str_replace(' ', '%', $normalizedCommodityName)
+                    )->first();
+                }
 
                 if (!$komoditas) {
-                    $errors[] = "Komoditas '{$data['metadata']['commodity_name']}' tidak ditemukan di database.";
+                    $errors[] = "Komoditas '{$originalCommodityName}' tidak ditemukan di database. (Dicoba dengan: '{$normalizedCommodityName}')";
                     continue;
                 }
 
                 $analysisDate = $data['metadata']['analysis_date'];
 
-                // [PERUBAHAN UTAMA] Mengganti ::create() dengan ::updateOrCreate()
+                // Mengganti ::create() dengan ::updateOrCreate()
                 $analisis = AnalisisHarga::updateOrCreate(
                     [
-                        // Kriteria untuk mencari record unik
                         'komoditas_id'  => $komoditas->id,
                         'analysis_date' => $analysisDate,
                     ],
                     [
-                        // Data untuk diisi atau di-update
                         'commodity_category' => $data['metadata']['commodity_category'] ?? null,
                         'data_freshness' => $data['metadata']['data_freshness'] ?? null,
                         'analysis_confidence' => $data['metadata']['analysis_confidence'] ?? null,
@@ -79,7 +104,7 @@ class AnalisisHargaController extends Controller {
                     ]
                 );
 
-                // Hapus data relasi lama sebelum menyisipkan yang baru untuk menghindari duplikasi
+                // Hapus data relasi lama sebelum menyisipkan yang baru
                 $analisis->dataBasedAlerts()->delete();
                 $analisis->monitoringSuggestions()->delete();
                 $analisis->patternImplications()->delete();
@@ -90,7 +115,7 @@ class AnalisisHargaController extends Controller {
                 $analisis->dataConstraints()->delete();
                 $analisis->assumptionsMade()->delete();
 
-                // [TAMBAHAN] Simpan data untuk relasi HasOne yang baru
+                // Simpan data untuk relasi HasOne
                 if (isset($data['strategic_analysis'])) {
                     $analisis->strategicAnalysis()->updateOrCreate(
                         ['analisis_harga_id' => $analisis->id],
@@ -118,7 +143,6 @@ class AnalisisHargaController extends Controller {
                 $results[] = "Analisis untuk '{$komoditas->nama}' pada tanggal {$analysisDate} berhasil diproses (dibuat/diperbarui).";
             }
 
-            // Jika ada error (misal komoditas tidak ditemukan), batalkan semua operasi database
             if (!empty($errors)) {
                 DB::rollBack();
                 return response()->json([
@@ -128,7 +152,6 @@ class AnalisisHargaController extends Controller {
                 ], 422);
             }
 
-            // Jika semua item berhasil diproses, simpan perubahan ke database
             DB::commit();
 
             return response()->json([
@@ -136,7 +159,6 @@ class AnalisisHargaController extends Controller {
                 'results' => $results
             ], 201);
         } catch (\Exception $e) {
-            // Jika terjadi kesalahan tak terduga, batalkan transaksi dan kirim response error
             DB::rollBack();
             return response()->json([
                 'message' => 'Terjadi kesalahan internal pada server.',
@@ -144,7 +166,6 @@ class AnalisisHargaController extends Controller {
             ], 500);
         }
     }
-
     /**
      * Helper function untuk menyimpan item dari sebuah array ke dalam tabel relasi.
      * Fungsi ini bersifat reusable untuk semua data array yang memiliki struktur sama.
@@ -153,21 +174,17 @@ class AnalisisHargaController extends Controller {
      * @param array $items Array berisi string yang akan disimpan (misal: ['Alert 1', 'Alert 2'])
      */
     private function saveRelatedData($relation, array $items) {
-        // Jika array kosong, tidak ada yang perlu dilakukan
         if (empty($items)) {
             return;
         }
 
         $dataToInsert = [];
-        // Ubah array of strings menjadi array of arrays untuk createMany()
         foreach ($items as $item) {
             $dataToInsert[] = ['content' => $item];
         }
 
-        // Gunakan createMany untuk efisiensi (bulk insert)
         $relation->createMany($dataToInsert);
     }
-
     /**
      * Mengambil data analisis untuk ditampilkan di frontend.
      * Fungsi ini mendukung filter berdasarkan rentang tanggal melalui query parameter.
@@ -176,7 +193,6 @@ class AnalisisHargaController extends Controller {
      * @return \Illuminate\Http\JsonResponse
      */
     public function index(Request $request) {
-        // 1. Validasi input dari query parameter URL
         $validator = Validator::make($request->query(), [
             'start_date' => 'nullable|date_format:Y-m-d',
             'end_date'   => 'nullable|date_format:Y-m-d|after_or_equal:start_date',
@@ -186,8 +202,6 @@ class AnalisisHargaController extends Controller {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        // 2. Memulai query builder
-        // Kita tetap memuat semua relasi yang dibutuhkan oleh frontend
         $query = AnalisisHarga::with([
             'komoditas',
             'strategicAnalysis',
@@ -203,28 +217,20 @@ class AnalisisHargaController extends Controller {
             'assumptionsMade'
         ]);
 
-        // 3. Terapkan filter tanggal secara kondisional menggunakan when()
-        // Ini adalah cara Laravel yang elegan untuk menambahkan klausa jika kondisi terpenuhi.
-
-        // Jika 'start_date' ada di request, tambahkan klausa where
         $query->when($request->start_date, function ($q, $startDate) {
             return $q->where('analysis_date', '>=', $startDate);
         });
 
-        // Jika 'end_date' ada di request, tambahkan klausa where
         $query->when($request->end_date, function ($q, $endDate) {
             return $q->where('analysis_date', '<=', $endDate);
         });
 
-        // Jika 'end_date' ada di request, tambahkan klausa where
         $query->when($request->limit, function ($q, $limit) {
             return $q->limit($limit);
         });
 
-        // 4. Urutkan hasilnya berdasarkan tanggal analisis terbaru dan eksekusi query
         $analisis = $query->latest('analysis_date')->get();
 
-        // 5. Kembalikan data dalam format JSON
         return response()->json($analisis);
     }
 }
