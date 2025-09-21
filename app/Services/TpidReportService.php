@@ -506,17 +506,42 @@ PROMPT;
     }
 
     /**
-     * Helper method untuk informasi musim
+     * Helper method untuk informasi musim dengan periode Pancaroba berdasarkan
+     * prediksi terkini dari BMKG (musim hujan datang lebih awal).
+     *
+     * @param \Carbon\Carbon $date
+     * @return string
      */
     private function getMusimInfo(Carbon $date): string {
         $month = $date->month;
 
-        if ($month >= 4 && $month <= 9) {
-            return "Musim Kemarau (potensi kekeringan, produksi sayuran menurun)";
-        } else {
-            return "Musim Hujan (potensi banjir, gangguan distribusi)";
+        // Musim Hujan dimulai lebih awal: Agustus sampai dengan April
+        // Puncak hujan di Kalimantan: November - Desember
+
+        // Pancaroba I: Peralihan Musim Kemarau ke Musim Hujan (Agustus – September)
+        if ($month >= 8 && $month <= 9) {
+            return "Musim Peralihan/Pancaroba I (Kemarau ke Hujan). Musim hujan mulai datang; hujan mulai meningkat, potensi hujan lokal, angin kencang dan ancaman cuaca ekstrem lokal.";
         }
+
+        // Musim Hujan: Puncak (Oktober – Desember)
+        if ($month >= 10 && $month <= 12) {
+            return "Musim Hujan (Puncak). Curah hujan tinggi, risiko banjir, genangan, tanah longsor, dan gangguan transportasi/logistik.";
+        }
+
+        // Musim Hujan: Lanjut (Januari – April)
+        if ($month >= 1 && $month <= 4) {
+            return "Musim Hujan (Lanjutan). Tetap basah; perhatian terhadap curah hujan tinggi dan fenomena cuaca ekstrem.";
+        }
+
+        // Pancaroba II: Peralihan dari Musim Hujan ke Kemarau (Mei – Juli)
+        if ($month >= 5 && $month <= 7) {
+            return "Musim Peralihan/Pancaroba II (Hujan ke Kemarau). Pelan-pelan curah hujan mulai menurun, risiko hujan sporadis/ekstrem lokal, pemeliharaan saluran air & drainase penting.";
+        }
+
+        // Fallback
+        return "Data musim tidak tersedia untuk bulan ini.";
     }
+
 
     /**
      * Helper method untuk HBKN terdekat
