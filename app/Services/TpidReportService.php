@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Harga;
 use App\Models\Komoditas;
+use App\Services\HETService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -14,9 +15,11 @@ class TpidReportService {
 
     // 1. TAMBAHKAN DEPENDENSI WeatherService
     protected $weatherService;
+    protected $hetService;
 
-    public function __construct(WeatherService $weatherService) {
+    public function __construct(WeatherService $weatherService, HETService $hetService) {
         $this->weatherService = $weatherService;
+        $this->hetService = $hetService;
     }
 
     /**
@@ -109,12 +112,14 @@ class TpidReportService {
 
         $statistics = $this->calculateStatistics($prices);
 
-        // 2. AMBIL DATA CUACA DI SINI
+        // AMBIL DATA CUACA
         $weatherContext = $this->getWeatherContext();
 
+        // AMBIL DATA HET/HAP
+        $hetContext = $this->hetService->findPriceControl($komoditas);
 
-        // 3. PASS DATA CUACA KE buildPrompt
-        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal, $weatherContext);
+        // PASS SEMUA DATA KE buildPrompt
+        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal, $weatherContext, $hetContext);
     }
 
     /**
@@ -239,8 +244,8 @@ class TpidReportService {
      * @param array $weatherContext <--- PARAMETER BARU
      * @return string
      */
-    private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate, array $weatherContext): string {
-        // Persiapan variabel dengan validasi dan formatting yang lebih robust
+    private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate, array $weatherContext, ?array $hetContext): string {
+        // ... (bagian persiapan variabel tetap sama) ...
         $dailyChangeText = is_numeric($stats['change_daily']) ? number_format($stats['change_daily'], 2) . '%' : 'N/A';
         $weeklyChangeText = is_numeric($stats['change_weekly']) ? number_format($stats['change_weekly'], 2) . '%' : 'N/A';
         $monthlyChangeText = is_numeric($stats['change_monthly']) ? number_format($stats['change_monthly'], 2) . '%' : 'N/A';
@@ -249,32 +254,54 @@ class TpidReportService {
         $max90dFormatted = number_format($stats['max_90d'], 0, ',', '.');
         $min90dFormatted = number_format($stats['min_90d'], 0, ',', '.');
         $volatility90dFormatted = number_format($stats['volatility_90d'], 0, ',', '.');
-
-        // Kalkulasi tambahan untuk memberikan konteks yang lebih kaya
-        $priceToAvgRatio = ($stats['average_90d'] > 0) ? ($stats['latest_price'] / $stats['average_90d']) * 100 : 0;
-        $priceToAvgText = number_format($priceToAvgRatio - 100, 2) . '%';
-        $coefficientOfVariation = ($stats['average_90d'] > 0) ? ($stats['volatility_90d'] / $stats['average_90d']) * 100 : 0;
-        $cvText = number_format($coefficientOfVariation, 2) . '%';
-
-        // 4. FORMAT DATA CUACA UNTUK DIMASUKKAN KE PROMPT
-        // Gunakan JSON_PRETTY_PRINT agar mudah dibaca oleh LLM
+        $priceToAvgText = number_format(($stats['average_90d'] > 0) ? (($stats['latest_price'] / $stats['average_90d']) * 100) - 100 : 0, 2) . '%';
+        $cvText = number_format(($stats['average_90d'] > 0) ? ($stats['volatility_90d'] / $stats['average_90d']) * 100 : 0, 2) . '%';
         $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        $priceHistoryJson = !empty($stats['price_history_7d']) ? json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : 'N/A';
 
-        // Kategorisasi komoditas untuk konteks yang lebih tepat
-        $kategoriKomoditas = $this->getKategoriKomoditas($komoditas->nama);
+        // --- LOGIKA BARU: MEMPROSES DAN MEMFORMAT DATA HET/HAP ---
+        $hetContextString = "Tidak ada data HET/HAP untuk komoditas ini.";
+        if ($hetContext) {
+            $latestPrice = $stats['latest_price'];
+            $het = (int) filter_var($hetContext['het'], FILTER_SANITIZE_NUMBER_INT);
+            $hapString = $hetContext['hap'];
+            $status = 'TIDAK DIKETAHUI';
+
+            if ($het > 0) {
+                $hetContextString = "HET (Harga Eceran Tertinggi): Rp " . number_format($het, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
+                if ($latestPrice > $het) {
+                    $selisih = number_format((($latestPrice / $het) - 1) * 100, 2);
+                    $status = "DI ATAS HET ({$selisih}% lebih tinggi)";
+                } else {
+                    $status = "DI BAWAH HET";
+                }
+            } elseif (!empty($hapString) && str_contains($hapString, '-')) {
+                list($hapBawah, $hapAtas) = array_map(fn($val) => (int) filter_var($val, FILTER_SANITIZE_NUMBER_INT), explode('-', $hapString));
+                $hetContextString = "HAP (Harga Acuan Penjualan): Rp " . number_format($hapBawah, 0, ',', '.') . " - Rp " . number_format($hapAtas, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
+                if ($latestPrice > $hapAtas) {
+                    $status = "DI ATAS RENTANG HAP";
+                } elseif ($latestPrice < $hapBawah) {
+                    $status = "DI BAWAH RENTANG HAP";
+                } else {
+                    $status = "DI DALAM RENTANG HAP";
+                }
+            } elseif (!empty($hapString)) {
+                $hap = (int) filter_var($hapString, FILTER_SANITIZE_NUMBER_INT);
+                $hetContextString = "HAP (Harga Acuan Penjualan): Rp " . number_format($hap, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
+                if ($latestPrice > $hap) {
+                    $status = "DI ATAS HAP";
+                } else {
+                    $status = "DI BAWAH HAP";
+                }
+            }
+            $hetContextString .= "\n- Status Harga Saat Ini: {$status}";
+        }
 
         $komoditasNama = $komoditas->nama;
+        $kategoriKomoditas = $this->getKategoriKomoditas($komoditas->nama);
         $tanggalAnalisis = $currentDate->isoFormat('dddd, D MMMM YYYY');
-
-        // Informasi kontekstual tambahan
         $musimInfo = $this->getMusimInfo($currentDate);
         $hbknTerdekat = $this->getHBKNTerdekat($currentDate);
-
-        // --- TAMBAHAN BARU: FORMAT RIWAYAT HARGA SEBAGAI JSON ---
-        $priceHistoryJson = 'N/A';
-        if (!empty($stats['price_history_7d'])) {
-            $priceHistoryJson = json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        }
 
         $prompt = <<<PROMPT
 **# SISTEM INSTRUKSI UTAMA #**
@@ -307,6 +334,12 @@ Gunakan ini untuk membingkai pertanyaan yang lebih cerdas:
 *   **Operasi Pasar:** Efektif untuk stabilisasi jangka pendek (5-15% dalam 1-2 minggu) jika volume dan waktu tepat.
 *   **Penetapan HET:** Berhasil jika ada penegakan yang kuat, namun berisiko menciptakan pasar gelap.
 *   **Intervensi Rantai Pasok (misal: subsidi transportasi):** Dampak bisa lebih lama, namun memerlukan investasi lebih besar.
+
+**## 1C. KONTEKS HARGA ACUAN (HET/HAP) ##**
+Ini adalah pilar kebijakan harga pangan nasional. Gunakan ini untuk menilai urgensi pergerakan harga:
+*   **HET (Harga Eceran Tertinggi):** Batas atas harga yang mengikat secara hukum. Harga di atas HET adalah pelanggaran dan memerlukan perhatian serius.
+*   **HAP (Harga Acuan Penjualan):** Rentang harga wajar. Harga di luar rentang ini (di atas atau di bawah) adalah **pemicu (trigger)** untuk analisis lebih lanjut atau intervensi pemerintah, bukan pelanggaran.
+*   **Tanpa Harga Acuan:** Harga diserahkan pada mekanisme pasar. Analisis berfokus pada volatilitas dan tren historis.
 
 ---
 **# BAGIAN 1B: KNOWLEDGE BASE ANALISIS HARGA (UNTUK KOMPATIBILITAS) #**
@@ -367,6 +400,10 @@ Gunakan ini untuk membingkai pertanyaan yang lebih cerdas:
 - **Data Terakhir:** {$lastDataDate}
 - **Konteks Musiman:** {$musimInfo}
 - **HBKN Terdekat:** {$hbknTerdekat}
+
+**## Konteks Harga Acuan (HET/HAP) ##**
+Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-undang/peraturannya, dan status harga saat ini terhadap HET/HAP jika ada.
+{$hetContextString}
 
 **## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
 {$weatherContextJson}
