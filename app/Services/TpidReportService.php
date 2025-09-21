@@ -110,7 +110,7 @@ class TpidReportService {
             return json_encode(['error' => "Gagal mendapatkan data terakhir untuk {$komoditas->nama}."]);
         }
 
-        $statistics = $this->calculateStatistics($prices);
+        $statistics = $this->calculateStatistics($prices, $komoditas);
 
         // AMBIL DATA CUACA
         $weatherContext = $this->getWeatherContext();
@@ -181,7 +181,7 @@ class TpidReportService {
     /**
      * PERBAIKAN: Konsisten menggunakan createFromFormat untuk semua operasi tanggal.
      */
-    private function calculateStatistics(Collection $prices): array {
+    private function calculateStatistics(Collection $prices, Komoditas $komoditas): array {
         $latest = $prices->last();
         $latestPrice = (float) $latest->harga;
 
@@ -212,6 +212,14 @@ class TpidReportService {
             $mean = $average; // Sudah dihitung
             $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $count);
         }
+
+        $cv = ($average > 0) ? ($stdDev / $average) * 100 : 0;
+
+        // --- PERUBAHAN UTAMA DI SINI ---
+        // Panggil method baru untuk mendapatkan threshold yang relevan dan dinamis
+        $maxCvThreshold = $this->getDynamicVolatilityThreshold($komoditas);
+
+        $volatilityIndex = ($maxCvThreshold > 0) ? min(100, ($cv / $maxCvThreshold) * 100) : 0;
         // --- TAMBAHAN BARU: EKSTRAK RIWAYAT HARGA 7 HARI TERAKHIR ---
         $priceHistory7d = $prices->slice(-7)->map(function ($price) {
             return [
@@ -226,11 +234,14 @@ class TpidReportService {
             'change_daily' => $dayChange,
             'change_weekly' => $weekChange,
             'change_monthly' => $monthChange,
-            'average_90d' => $average ?: 0, // Hindari null jika collection kosong
+            'average_90d' => $average ?: 0,
             'max_90d' => $max ?: 0,
             'min_90d' => $min ?: 0,
             'volatility_90d' => $stdDev,
-            'price_history_7d' => $priceHistory7d, // <-- DATA BARU DITAMBAHKAN DI SINI
+            'cv_percentage' => round($cv, 2), // Sangat berguna untuk debugging
+            'volatility_index' => round($volatilityIndex, 2), // Indeks dinamis Anda
+            'dynamic_threshold_used' => round($maxCvThreshold, 2), // Tambahkan ini agar transparan!
+            'price_history_7d' => $priceHistory7d,
         ];
     }
 
@@ -255,7 +266,17 @@ class TpidReportService {
         $min90dFormatted = number_format($stats['min_90d'], 0, ',', '.');
         $volatility90dFormatted = number_format($stats['volatility_90d'], 0, ',', '.');
         $priceToAvgText = number_format(($stats['average_90d'] > 0) ? (($stats['latest_price'] / $stats['average_90d']) * 100) - 100 : 0, 2) . '%';
-        $cvText = number_format(($stats['average_90d'] > 0) ? ($stats['volatility_90d'] / $stats['average_90d']) * 100 : 0, 2) . '%';
+
+
+
+        // --- VARIABEL BARU UNTUK DITAMBAHKAN ---
+        // Pastikan Anda sudah menghitung ini di calculateStatistics
+        $volatilityIndexFormatted = number_format($stats['volatility_index'], 2);
+        $cvText = number_format($stats['cv_percentage'], 2) . '%'; // Sumbernya sekarang dari $stats
+        $dynamicThresholdUsedFormatted = number_format($stats['dynamic_threshold_used'], 2) . '%';
+
+        dd($volatilityIndexFormatted, $cvText, $dynamicThresholdUsedFormatted);
+
         $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         $priceHistoryJson = !empty($stats['price_history_7d']) ? json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : 'N/A';
 
@@ -389,6 +410,16 @@ Ini adalah pilar kebijakan harga pangan nasional. Gunakan ini untuk menilai urge
 - **MEDIUM:** Data cukup, pola terlihat, beberapa keterbatasan
 - **LOW:** Data terbatas, pola tidak jelas, banyak keterbatasan
 
+**## 1.4. Interpretasi Indeks Volatilitas (WAJIB DIGUNAKAN) ##**
+Anda akan diberikan tiga metrik volatilitas utama:
+1.  **Coefficient of Variation (CV):** Tingkat fluktuasi harga saat ini.
+2.  **Ambang Batas Volatilitas Historis (P95):** Level CV yang dianggap "ekstrem" berdasarkan data historis 2 tahun terakhir (level persentil ke-95).
+3.  **Indeks Volatilitas (0-100):** Hasil perbandingan CV saat ini terhadap Ambang Batas Historis (`Indeks = (CV / Ambang Batas) * 100`).
+
+**TUGAS ANDA:** Dalam output JSON, khususnya di field `key_observation` dan `volatility_analysis`, Anda **HARUS** menjelaskan hubungan antara ketiga metrik ini. Jangan hanya menyebutkan angka indeksnya. Jelaskan bahwa indeks tersebut tinggi/rendah **KARENA** CV saat ini sudah mendekati/jauh dari ambang batas historisnya.
+
+**Contoh Kalimat yang Baik:** "Indeks volatilitas mencapai 75.2, yang tergolong TINGGI. Ini karena tingkat fluktuasi harga saat ini (CV 37.6%) telah mencapai lebih dari tiga perempat dari ambang batas volatilitas ekstrem yang secara historis jarang terjadi untuk komoditas ini (50.0%)."
+
 ---
 **# BAGIAN 2: DATA UNTUK ANALISIS #**
 
@@ -419,6 +450,8 @@ Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-unda
 - **Harga Terendah:** Rp {$min90dFormatted}
 - **Volatilitas (Std Dev):** Rp {$volatility90dFormatted}
 - **Coefficient of Variation:** {$cvText}
+- **Ambang Batas Volatilitas Historis (P95):** {$dynamicThresholdUsedFormatted}
+- **Indeks Volatilitas (0-100):** {$volatilityIndexFormatted}
 
 **## Riwayat Harga (7 Hari Terakhir) ##**
 {$priceHistoryJson}
@@ -597,5 +630,89 @@ PROMPT;
         }
 
         return "Tidak ada HBKN dalam 30 hari ke depan";
+    }
+
+    // Tambahkan method baru ini di dalam class TpidReportService
+
+    /**
+     * Menghitung dan mengambil threshold volatilitas dinamis (persentil ke-95 dari CV historis)
+     * untuk sebuah komoditas. Hasilnya di-cache untuk meningkatkan kinerja.
+     *
+     * @param Komoditas $komoditas
+     * @return float
+     */
+    private function getDynamicVolatilityThreshold(Komoditas $komoditas): float {
+        // Kunci cache yang unik untuk setiap komoditas
+        $cacheKey = 'volatility_threshold_' . $komoditas->id_komoditas;
+        // Simpan di cache selama 1 hari. Sesuaikan durasi sesuai kebutuhan.
+        $cacheDuration = now()->addDay();
+
+        return Cache::remember($cacheKey, $cacheDuration, function () use ($komoditas) {
+            // 1. Ambil data historis (misal: 2 tahun terakhir) untuk perhitungan
+            $twoYearsAgo = now()->subYears(2);
+            $allPrices = Harga::where('id_komoditas', $komoditas->id_komoditas)
+                ->get()
+                // Konversi tanggal string ke objek Carbon untuk sorting
+                ->map(function ($price) {
+                    $price->parsed_date = Carbon::createFromFormat('d/m/Y', $price->tanggal);
+                    return $price;
+                })
+                ->where('parsed_date', '>=', $twoYearsAgo)
+                ->sortBy('parsed_date')
+                ->values(); // Reset keys
+
+            // Butuh setidaknya 90 hari data untuk memulai perhitungan
+            if ($allPrices->count() < 90) {
+                // Fallback ke nilai default jika data tidak cukup
+                // Gunakan threshold dari kategori komoditas sebagai fallback yang cerdas
+                return $this->getStaticThresholdForCategory($komoditas);
+            }
+
+            // 2. Lakukan perhitungan CV 90-hari secara bergulir (rolling)
+            $historicalCvs = new Collection();
+            $windowSize = 90;
+
+            for ($i = $windowSize; $i < $allPrices->count(); $i++) {
+                $window = $allPrices->slice($i - $windowSize, $windowSize);
+                $priceValues = $window->pluck('harga')->map(fn($p) => (float)$p);
+
+                $average = $priceValues->avg();
+                if ($average > 0) {
+                    $mean = $average;
+                    $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $windowSize);
+                    $cv = ($stdDev / $mean) * 100;
+                    $historicalCvs->push($cv);
+                }
+            }
+
+            if ($historicalCvs->isEmpty()) {
+                return $this->getStaticThresholdForCategory($komoditas); // Fallback lagi
+            }
+
+            // 3. Hitung Persentil ke-95
+            $sortedCvs = $historicalCvs->sort()->values()->all();
+            $count = count($sortedCvs);
+            $index = floor(0.95 * ($count - 1)); // Indeks untuk persentil ke-95
+
+            $percentileValue = $sortedCvs[$index];
+
+            // Pastikan threshold tidak terlalu kecil (misal, untuk komoditas yang sangat stabil)
+            // Nilai minimum 10% bisa menjadi batas bawah yang masuk akal.
+            return max(10.0, $percentileValue);
+        });
+    }
+
+    /**
+     * Helper untuk fallback ke threshold statis berbasis kategori.
+     * (Ini adalah logika dari jawaban sebelumnya)
+     */
+    private function getStaticThresholdForCategory(Komoditas $komoditas): float {
+        $kategori = $this->getKategoriKomoditas($komoditas->nama);
+        $thresholds = [
+            'POKOK' => 15.0,
+            'PENTING' => 30.0,
+            'VOLATIL' => 50.0,
+        ];
+        return $thresholds[$kategori] ?? 30.0;
     }
 }
