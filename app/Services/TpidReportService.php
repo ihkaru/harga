@@ -432,7 +432,7 @@ Anda akan diberikan tiga metrik volatilitas utama:
 - **HBKN Terdekat:** {$hbknTerdekat}
 
 **## Konteks Harga Acuan (HET/HAP) ##**
-Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-undang/peraturannya, dan status harga saat ini terhadap HET/HAP jika ada.
+Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-undang/peraturannya, dan status harga saat ini terhadap HET/HAP jika ada. Jika data HET/HAP tidak ada, jangan singgung sama sekali di key_observation.
 {$hetContextString}
 
 **## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
