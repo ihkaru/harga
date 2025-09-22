@@ -285,7 +285,7 @@ class TpidReportService {
             $latestPrice = $stats['latest_price'];
             $het = (int) filter_var($hetContext['het'], FILTER_SANITIZE_NUMBER_INT);
             $hapString = $hetContext['hap'];
-            $status = 'TIDAK DIKETAHUI';
+            $status = 'BELUM DITEMUKAN';
 
             if ($het > 0) {
                 $hetContextString = "HET (Harga Eceran Tertinggi): Rp " . number_format($het, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
