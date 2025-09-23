@@ -9,6 +9,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class TpidReportService {
@@ -31,29 +32,34 @@ class TpidReportService {
      * @return Collection
      */
     public function getTopMovers($limit = 5, $days = 7): Collection {
-        // Peringatan: Sangat direkomendasikan untuk mengubah kolom 'tanggal' menjadi tipe DATE di database.
-        // Jika sudah DATE, hapus semua Carbon::createFromFormat.
-
-        // 1. Ambil semua data harga dalam rentang waktu yang relevan (misal: 100 hari terakhir) dalam satu query.
-        // Ini jauh lebih efisien daripada query di dalam loop.
+        // Ambil data dengan limit yang wajar untuk mencegah memory overflow
         $allPrices = Harga::whereIn('id_komoditas', Komoditas::pluck('id_komoditas'))
             ->orderBy('id_komoditas')
-            ->orderByRaw("STR_TO_DATE(tanggal, '%d/%m/%Y') DESC") // <-- Order berdasarkan tanggal yang dikonversi
-            // ->limit(40 * 100) // Ambil cukup data untuk setiap komoditas
             ->get();
 
         if ($allPrices->isEmpty()) {
             return new Collection();
         }
 
-        // 2. Kelompokkan berdasarkan id_komoditas
-        $pricesByCommodity = $allPrices->groupBy('id_komoditas');
+        // PERBAIKAN: Validasi dan filter tanggal yang tidak valid
+        $validPrices = $allPrices->filter(function ($price) {
+            try {
+                Carbon::createFromFormat('d/m/Y', $price->tanggal);
+                return $price->harga > 0; // Filter harga non-positif
+            } catch (\Exception $e) {
+                Log::warning("Invalid date format for price ID {$price->id}: {$price->tanggal}");
+                return false;
+            }
+        });
+
+        $pricesByCommodity = $validPrices->groupBy('id_komoditas');
         $allCommodities = Komoditas::whereIn('id_komoditas', $pricesByCommodity->keys())->get()->keyBy('id_komoditas');
         $changes = new Collection();
 
         foreach ($pricesByCommodity as $id_komoditas => $prices) {
-            // Urutkan sekali lagi di collection untuk memastikan (terkadang groupBy bisa mengubah urutan)
-            $sortedPrices = $prices->sortByDesc(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal));
+            $sortedPrices = $prices->sortByDesc(function ($p) {
+                return Carbon::createFromFormat('d/m/Y', $p->tanggal);
+            });
 
             $latestPriceRecord = $sortedPrices->first();
             if (!$latestPriceRecord) {
@@ -61,18 +67,18 @@ class TpidReportService {
             }
 
             $comparisonDate = Carbon::createFromFormat('d/m/Y', $latestPriceRecord->tanggal)->subDays($days);
-
-            // Cari harga pembanding di dalam collection, bukan query DB lagi
             $comparisonPriceRecord = $sortedPrices->first(function ($price) use ($comparisonDate) {
                 return Carbon::createFromFormat('d/m/Y', $price->tanggal)->lte($comparisonDate);
             });
 
             $komoditas = $allCommodities->get($id_komoditas);
-            // dump($allCommodities->get($id_komoditas)->nama);
 
+            // PERBAIKAN: Validasi yang lebih ketat
+            if (
+                $komoditas && $comparisonPriceRecord &&
+                $comparisonPriceRecord->harga > 0 && $latestPriceRecord->harga > 0
+            ) {
 
-
-            if ($komoditas && $comparisonPriceRecord && $comparisonPriceRecord->harga > 0) {
                 $latestPrice = (float) $latestPriceRecord->harga;
                 $comparisonPrice = (float) $comparisonPriceRecord->harga;
                 $percentageChange = (($latestPrice - $comparisonPrice) / $comparisonPrice) * 100;
@@ -86,25 +92,34 @@ class TpidReportService {
             }
         }
 
-        $sortedChanges = $changes->sortByDesc(fn($item) => abs($item['change']));
-
-        return $sortedChanges->values()->take($limit); // Gunakan values() untuk reset keys
+        return $changes->sortByDesc(fn($item) => abs($item['change']))->values()->take($limit);
     }
-    /**
-     * PERBAIKAN: Query disesuaikan untuk menangani format tanggal string 'd/m/Y'
-     * dan diurutkan dengan benar.
-     */
     public function generateTpidAnalysisPrompt(Komoditas $komoditas, Carbon $currentDate): string {
-        // ... (logika pengambilan data harga tetap sama) ...
-        $allPricesForCommodity = Harga::where('id_komoditas', $komoditas->id_komoditas)->get();
+        // Cek weather sensitivity dulu sebelum fetch data weather
+        $isWeatherRelevant = $this->isWeatherSensitive($komoditas);
 
-        $prices = $allPricesForCommodity
+        $allPricesForCommodity = Harga::where('id_komoditas', $komoditas->id_komoditas)
+            ->limit(200) // PERBAIKAN: Tambah limit untuk mencegah memory issue
+            ->get();
+
+        // PERBAIKAN: Validasi data sebelum sorting
+        $validPrices = $allPricesForCommodity->filter(function ($price) {
+            try {
+                Carbon::createFromFormat('d/m/Y', $price->tanggal);
+                return $price->harga > 0;
+            } catch (\Exception $e) {
+                return false;
+            }
+        });
+
+        $prices = $validPrices
             ->sortBy(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal))
             ->slice(-90);
 
         if ($prices->count() < 2) {
             return json_encode(['error' => "Data untuk komoditas {$komoditas->nama} tidak cukup untuk dianalisis."]);
         }
+
         $lastData = $prices->last();
         if (!$lastData) {
             return json_encode(['error' => "Gagal mendapatkan data terakhir untuk {$komoditas->nama}."]);
@@ -112,14 +127,22 @@ class TpidReportService {
 
         $statistics = $this->calculateStatistics($prices, $komoditas);
 
-        // AMBIL DATA CUACA
-        $weatherContext = $this->getWeatherContext();
+        // PERBAIKAN: Fetch weather hanya jika relevan
+        $weatherContext = $isWeatherRelevant ? $this->getWeatherContext() : [];
 
-        // AMBIL DATA HET/HAP
         $hetContext = $this->hetService->findPriceControl($komoditas);
+        $specificCommodityContext = $this->getCommoditySpecificContext($komoditas);
 
-        // PASS SEMUA DATA KE buildPrompt
-        return $this->buildPrompt($komoditas, $statistics, $currentDate, $lastData->tanggal, $weatherContext, $hetContext);
+        return $this->buildPrompt(
+            $komoditas,
+            $statistics,
+            $currentDate,
+            $lastData->tanggal,
+            $weatherContext,
+            $hetContext,
+            $specificCommodityContext,
+            $isWeatherRelevant
+        );
     }
 
     /**
@@ -129,41 +152,56 @@ class TpidReportService {
     private function getWeatherContext(): array {
         $mempawahCoords = config('tpid.locations.mempawah');
         $kalbarCoords = config('tpid.locations.kalbar_regional');
-        $cacheDuration = now()->addHours(6); // Simpan data cuaca selama 6 jam
+
+        // PERBAIKAN: Cache per jam, bukan per hari
+        $cacheHour = now()->format('Y-m-d-H');
+        $cacheDuration = now()->addHours(1);
 
         $weatherContext = [
             'konteks_cuaca_mempawah' => null,
             'konteks_cuaca_kalbar' => null,
         ];
 
-        // --- Ambil data untuk Mempawah DENGAN CACHE ---
-        $mempawahCacheKey = 'weather_' . Str::slug($mempawahCoords['name']) . '_' . now()->toDateString();
-
-        $mempawahData = Cache::remember($mempawahCacheKey, $cacheDuration, function () use ($mempawahCoords) {
-            return $this->weatherService->getHistoricalWeatherSummary($mempawahCoords['latitude'], $mempawahCoords['longitude']);
-        });
-
-        if ($mempawahData) {
-            $weatherContext['konteks_cuaca_mempawah'] = [
-                'level' => $mempawahCoords['name'],
-                'ringkasan_data' => $mempawahData,
-            ];
-        }
-
-        // --- Ambil data untuk Regional Kalbar DENGAN CACHE ---
-        $regionalData = [];
-        foreach ($kalbarCoords as $key => $coords) {
-            $regionalCacheKey = 'weather_' . Str::slug($coords['name']) . '_' . now()->toDateString();
-
-            $data = Cache::remember($regionalCacheKey, $cacheDuration, function () use ($coords) {
-                return $this->weatherService->getHistoricalWeatherSummary($coords['latitude'], $coords['longitude']);
+        // PERBAIKAN: Tambah try-catch untuk handle API failures
+        try {
+            $mempawahCacheKey = "weather_mempawah_{$cacheHour}";
+            $mempawahData = Cache::remember($mempawahCacheKey, $cacheDuration, function () use ($mempawahCoords) {
+                return $this->weatherService->getHistoricalWeatherSummary(
+                    $mempawahCoords['latitude'],
+                    $mempawahCoords['longitude']
+                );
             });
 
-            if ($data) {
-                $regionalData[] = [
-                    'lokasi' => $coords['name'],
-                    'ringkasan_data' => $data,
+            if ($mempawahData) {
+                $weatherContext['konteks_cuaca_mempawah'] = [
+                    'level' => $mempawahCoords['name'],
+                    'ringkasan_data' => $mempawahData,
                 ];
+            }
+        } catch (\Exception $e) {
+            Log::warning("Weather API failed for Mempawah: " . $e->getMessage());
+        }
+
+        // Regional data dengan error handling
+        $regionalData = [];
+        foreach ($kalbarCoords as $key => $coords) {
+            try {
+                $regionalCacheKey = "weather_{$key}_{$cacheHour}";
+                $data = Cache::remember($regionalCacheKey, $cacheDuration, function () use ($coords) {
+                    return $this->weatherService->getHistoricalWeatherSummary(
+                        $coords['latitude'],
+                        $coords['longitude']
+                    );
+                });
+
+                if ($data) {
+                    $regionalData[] = [
+                        'lokasi' => $coords['name'],
+                        'ringkasan_data' => $data,
+                    ];
+                }
+            } catch (\Exception $e) {
+                Log::warning("Weather API failed for {$coords['name']}: " . $e->getMessage());
             }
         }
 
@@ -187,7 +225,6 @@ class TpidReportService {
 
         $previousDay = $prices->slice(-2, 1)->first();
 
-        // PERBAIKAN: Gunakan Carbon untuk perbandingan tanggal yang akurat pada collection
         $latestDate = Carbon::createFromFormat('d/m/Y', $latest->tanggal);
         $sevenDaysAgoDate = $latestDate->copy()->subDays(7);
         $thirtyDaysAgoDate = $latestDate->copy()->subDays(30);
@@ -195,39 +232,45 @@ class TpidReportService {
         $sevenDaysAgo = $prices->last(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal)->lte($sevenDaysAgoDate));
         $thirtyDaysAgo = $prices->last(fn($p) => Carbon::createFromFormat('d/m/Y', $p->tanggal)->lte($thirtyDaysAgoDate));
 
-        // Kalkulasi perubahan (tidak ada perubahan di sini, sudah benar)
-        $dayChange = $previousDay && $previousDay->harga > 0 ? (($latestPrice - $previousDay->harga) / $previousDay->harga) * 100 : 'N/A';
-        $weekChange = $sevenDaysAgo && $sevenDaysAgo->harga > 0 ? (($latestPrice - $sevenDaysAgo->harga) / $sevenDaysAgo->harga) * 100 : 'N/A';
-        $monthChange = $thirtyDaysAgo && $thirtyDaysAgo->harga > 0 ? (($latestPrice - $thirtyDaysAgo->harga) / $thirtyDaysAgo->harga) * 100 : 'N/A';
+        // PERBAIKAN: Tambah validasi untuk menghindari division by zero
+        $dayChange = ($previousDay && $previousDay->harga > 0) ?
+            (($latestPrice - $previousDay->harga) / $previousDay->harga) * 100 : null;
+
+        $weekChange = ($sevenDaysAgo && $sevenDaysAgo->harga > 0) ?
+            (($latestPrice - $sevenDaysAgo->harga) / $sevenDaysAgo->harga) * 100 : null;
+
+        $monthChange = ($thirtyDaysAgo && $thirtyDaysAgo->harga > 0) ?
+            (($latestPrice - $thirtyDaysAgo->harga) / $thirtyDaysAgo->harga) * 100 : null;
 
         $priceValues = $prices->pluck('harga')->map(fn($p) => (float)$p);
+        $count = $priceValues->count();
         $average = $priceValues->avg();
         $max = $priceValues->max();
         $min = $priceValues->min();
 
-        // PERBAIKAN: Hindari division by zero jika hanya ada 1 data.
-        $count = $priceValues->count();
+        // PERBAIKAN: Gunakan sample standard deviation untuk data yang lebih akurat
         $stdDev = 0;
-        if ($count > 1) {
-            $mean = $average; // Sudah dihitung
-            $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $count);
+        if ($count > 1 && $average > 0) {
+            $variance = $priceValues->map(fn($val) => pow($val - $average, 2))->sum() / ($count - 1);
+            $stdDev = sqrt($variance);
         }
 
         $cv = ($average > 0) ? ($stdDev / $average) * 100 : 0;
 
-        // --- PERUBAHAN UTAMA DI SINI ---
-        // Panggil method baru untuk mendapatkan threshold yang relevan dan dinamis
+        // PERBAIKAN: Volatility index yang lebih intuitif
         $maxCvThreshold = $this->getDynamicVolatilityThreshold($komoditas);
 
-        $volatilityIndex = ($maxCvThreshold > 0) ? min(100, ($cv / $maxCvThreshold) * 100) : 0;
-        // --- TAMBAHAN BARU: EKSTRAK RIWAYAT HARGA 7 HARI TERAKHIR ---
+        // Menggunakan skala yang lebih intuitif:
+        // 0-40: Rendah, 40-70: Sedang, 70-90: Tinggi, 90+: Sangat Tinggi
+        $volatilityIndex = ($maxCvThreshold > 0) ? ($cv / $maxCvThreshold) * 100 : 0;
+        // Tidak perlu min(100, ...) karena nilai di atas 100 menunjukkan kondisi ekstrem
+
         $priceHistory7d = $prices->slice(-7)->map(function ($price) {
             return [
                 'tanggal' => $price->tanggal,
                 'harga' => (int) $price->harga,
             ];
-        })->values()->all(); // `values()` untuk mereset keys array menjadi 0, 1, 2, ...
-
+        })->values()->all();
 
         return [
             'latest_price' => $latestPrice,
@@ -238,24 +281,39 @@ class TpidReportService {
             'max_90d' => $max ?: 0,
             'min_90d' => $min ?: 0,
             'volatility_90d' => $stdDev,
-            'cv_percentage' => round($cv, 2), // Sangat berguna untuk debugging
-            'volatility_index' => round($volatilityIndex, 2), // Indeks dinamis Anda
-            'dynamic_threshold_used' => round($maxCvThreshold, 2), // Tambahkan ini agar transparan!
+            'cv_percentage' => round($cv, 2),
+            'volatility_index' => round($volatilityIndex, 2),
+            'dynamic_threshold_used' => round($maxCvThreshold, 2),
             'price_history_7d' => $priceHistory7d,
+            // PERBAIKAN: Tambah metadata untuk debugging
+            'data_points_used' => $count,
+            'calculation_method' => 'sample_standard_deviation'
         ];
     }
 
     /**
-     * PERBAIKAN: Signature method diubah dan prompt diperkaya dengan data cuaca.
+     * PERBAIKAN: Signature method diubah. Prompt kini dinamis berdasarkan relevansi konteks.
      *
      * @param Komoditas $komoditas
      * @param array $stats
      * @param Carbon $currentDate
      * @param string $lastDataDate
-     * @param array $weatherContext <--- PARAMETER BARU
+     * @param array $weatherContext
+     * @param array|null $hetContext
+     * @param string $specificCommodityContext <--- PARAMETER BARU
+     * @param bool $isWeatherRelevant <--- PARAMETER BARU
      * @return string
      */
-    private function buildPrompt(Komoditas $komoditas, array $stats, Carbon $currentDate, string $lastDataDate, array $weatherContext, ?array $hetContext): string {
+    private function buildPrompt(
+        Komoditas $komoditas,
+        array $stats,
+        Carbon $currentDate,
+        string $lastDataDate,
+        array $weatherContext,
+        ?array $hetContext,
+        string $specificCommodityContext, // <-- Parameter baru
+        bool $isWeatherRelevant
+    ): string {
         // ... (bagian persiapan variabel tetap sama) ...
         $dailyChangeText = is_numeric($stats['change_daily']) ? number_format($stats['change_daily'], 2) . '%' : 'N/A';
         $weeklyChangeText = is_numeric($stats['change_weekly']) ? number_format($stats['change_weekly'], 2) . '%' : 'N/A';
@@ -265,7 +323,9 @@ class TpidReportService {
         $max90dFormatted = number_format($stats['max_90d'], 0, ',', '.');
         $min90dFormatted = number_format($stats['min_90d'], 0, ',', '.');
         $volatility90dFormatted = number_format($stats['volatility_90d'], 0, ',', '.');
-        $priceToAvgText = number_format(($stats['average_90d'] > 0) ? (($stats['latest_price'] / $stats['average_90d']) * 100) - 100 : 0, 2) . '%';
+        // PERBAIKAN: Handle division by zero
+        $priceToAvgText = ($stats['average_90d'] > 0) ?
+            number_format((($stats['latest_price'] / $stats['average_90d']) * 100) - 100, 2) . '%' : 'N/A';
 
 
 
@@ -279,13 +339,15 @@ class TpidReportService {
         $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         $priceHistoryJson = !empty($stats['price_history_7d']) ? json_encode($stats['price_history_7d'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : 'N/A';
 
-        // --- LOGIKA BARU: MEMPROSES DAN MEMFORMAT DATA HET/HAP ---
-        $hetContextString = "Tidak ada data HET/HAP untuk komoditas ini.";
+        // --- PERUBAHAN UTAMA 1: MEMBUAT KONTEKS HET/HAP MENJADI KONDISIONAL ---
+        $hetSection = ""; // Default string kosong
+        $hetInstruction = "Harga diserahkan pada mekanisme pasar. Analisis berfokus pada volatilitas dan tren historis.";
         if ($hetContext) {
             $latestPrice = $stats['latest_price'];
             $het = (int) filter_var($hetContext['het'], FILTER_SANITIZE_NUMBER_INT);
             $hapString = $hetContext['hap'];
             $status = 'BELUM DITEMUKAN';
+            $hetContextString = ""; // Reset
 
             if ($het > 0) {
                 $hetContextString = "HET (Harga Eceran Tertinggi): Rp " . number_format($het, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
@@ -298,23 +360,40 @@ class TpidReportService {
             } elseif (!empty($hapString) && str_contains($hapString, '-')) {
                 list($hapBawah, $hapAtas) = array_map(fn($val) => (int) filter_var($val, FILTER_SANITIZE_NUMBER_INT), explode('-', $hapString));
                 $hetContextString = "HAP (Harga Acuan Penjualan): Rp " . number_format($hapBawah, 0, ',', '.') . " - Rp " . number_format($hapAtas, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
-                if ($latestPrice > $hapAtas) {
-                    $status = "DI ATAS RENTANG HAP";
-                } elseif ($latestPrice < $hapBawah) {
-                    $status = "DI BAWAH RENTANG HAP";
-                } else {
-                    $status = "DI DALAM RENTANG HAP";
-                }
+                if ($latestPrice > $hapAtas) $status = "DI ATAS RENTANG HAP";
+                elseif ($latestPrice < $hapBawah) $status = "DI BAWAH RENTANG HAP";
+                else $status = "DI DALAM RENTANG HAP";
             } elseif (!empty($hapString)) {
                 $hap = (int) filter_var($hapString, FILTER_SANITIZE_NUMBER_INT);
                 $hetContextString = "HAP (Harga Acuan Penjualan): Rp " . number_format($hap, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
-                if ($latestPrice > $hap) {
-                    $status = "DI ATAS HAP";
-                } else {
-                    $status = "DI BAWAH HAP";
-                }
+                if ($latestPrice > $hap) $status = "DI ATAS HAP";
+                else $status = "DI BAWAH HAP";
             }
+
             $hetContextString .= "\n- Status Harga Saat Ini: {$status}";
+
+            // Buat blok teks untuk disuntikkan ke dalam prompt
+            $hetSection = <<<HET
+**## Konteks Harga Acuan (HET/HAP) ##**
+{$hetContextString}
+HET;
+            // Ganti instruksi default jika ada HET/HAP
+            $hetInstruction = <<<HET_INST
+*   **HET (Harga Eceran Tertinggi):** Batas atas harga yang mengikat secara hukum. Harga di atas HET adalah pelanggaran dan memerlukan perhatian serius.
+*   **HAP (Harga Acuan Penjualan):** Rentang harga wajar. Harga di luar rentang ini adalah **pemicu (trigger)** untuk analisis, bukan pelanggaran.
+HET_INST;
+        }
+
+
+        // --- PERUBAHAN UTAMA 2: MEMBUAT KONTEKS CUACA MENJADI KONDISIONAL ---
+        $weatherSection = "";
+        if ($isWeatherRelevant && !empty($weatherContext)) {
+            $weatherContextJson = json_encode($weatherContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            $weatherSection = <<<WEATHER
+**## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
+*Catatan: Konteks cuaca ini sangat relevan untuk analisis komoditas hortikultura/pertanian.*
+{$weatherContextJson}
+WEATHER;
         }
 
         $komoditasNama = $komoditas->nama;
@@ -323,9 +402,13 @@ class TpidReportService {
         $musimInfo = $this->getMusimInfo($currentDate);
         $hbknTerdekat = $this->getHBKNTerdekat($currentDate);
 
+        // PERBAIKAN: Tambah informasi debugging dalam prompt
+        $debugInfo = "Data points used: {$stats['data_points_used']}, Calculation: {$stats['calculation_method']}";
+
         $prompt = <<<PROMPT
 **# SISTEM INSTRUKSI UTAMA #**
 Anda adalah "Analis Kontekstual", sebuah AI yang dirancang untuk memberikan dukungan keputusan kepada Tim Pengendali Inflasi Daerah (TPID) Kabupaten Mempawah. Peran Anda adalah mengubah data harga mentah menjadi wawasan strategis yang sadar konteks, memberdayakan, dan transparan.
+Gunakan bahasa yang lebih mudah dipahami oleh pembaca non-finansial dan non-statistik.
 
 **## Prinsip Panduan Anda: ##**
 1.  **Konteks di Atas Prediksi:** Fokus pada **konteks** historis dan kelembagaan, bukan prediksi absolut.
@@ -355,11 +438,17 @@ Gunakan ini untuk membingkai pertanyaan yang lebih cerdas:
 *   **Penetapan HET:** Berhasil jika ada penegakan yang kuat, namun berisiko menciptakan pasar gelap.
 *   **Intervensi Rantai Pasok (misal: subsidi transportasi):** Dampak bisa lebih lama, namun memerlukan investasi lebih besar.
 
-**## 1C. KONTEKS HARGA ACUAN (HET/HAP) ##**
+**## 1.4. Konteks Spesifik untuk Komoditas: {$komoditasNama} ##**
+Gunakan informasi ini sebagai petunjuk utama saat melakukan analisis penyebab (Causal Analysis):
+{$specificCommodityContext}
+
+**## 1.5. Konteks Harga Acuan (HET/HAP) ##**
 Ini adalah pilar kebijakan harga pangan nasional. Gunakan ini untuk menilai urgensi pergerakan harga:
 *   **HET (Harga Eceran Tertinggi):** Batas atas harga yang mengikat secara hukum. Harga di atas HET adalah pelanggaran dan memerlukan perhatian serius.
 *   **HAP (Harga Acuan Penjualan):** Rentang harga wajar. Harga di luar rentang ini (di atas atau di bawah) adalah **pemicu (trigger)** untuk analisis lebih lanjut atau intervensi pemerintah, bukan pelanggaran.
 *   **Tanpa Harga Acuan:** Harga diserahkan pada mekanisme pasar. Analisis berfokus pada volatilitas dan tren historis.
+Ini adalah pilar kebijakan harga pangan nasional. Gunakan ini untuk menilai urgensi pergerakan harga:
+{$hetInstruction}
 
 ---
 **# BAGIAN 1B: KNOWLEDGE BASE ANALISIS HARGA (UNTUK KOMPATIBILITAS) #**
@@ -432,7 +521,6 @@ Anda akan diberikan tiga metrik volatilitas utama:
 - **HBKN Terdekat:** {$hbknTerdekat}
 
 **## Konteks Harga Acuan (HET/HAP) ##**
-Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-undang/peraturannya, dan status harga saat ini terhadap HET/HAP jika ada. Jika data HET/HAP tidak ada, jangan singgung sama sekali di key_observation.
 {$hetContextString}
 
 **## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
@@ -451,14 +539,17 @@ Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-unda
 - **Coefficient of Variation:** {$cvText}
 - **Ambang Batas Volatilitas Historis (P95):** {$dynamicThresholdUsedFormatted}
 - **Indeks Volatilitas (0-100):** {$volatilityIndexFormatted}
+- **Debug Info:** {$debugInfo}
+
+{$weatherSection}
 
 **## Riwayat Harga (7 Hari Terakhir) ##**
 {$priceHistoryJson}
 
 ---
 **# BAGIAN 3: INSTRUKSI OUTPUT JSON v2.0 #**
-
-**TUGAS ANDA:** Berdasarkan **Knowledge Base** di Bagian 1 dan **Data** di Bagian 2, hasilkan output dalam format **JSON MURNI** dengan struktur v2.0 di bawah ini. Pastikan setiap field terisi sesuai dengan prinsip dan panduan yang diberikan.
+Berdasarkan **Knowledge Base** di Bagian 1 dan **Data** di Bagian 2, hasilkan output dalam format **JSON MURNI**.
+**PENTING**: Jika tidak ada data HET/HAP untuk komoditas ini (ditandai dengan tidak adanya bagian "Konteks Harga Acuan" di atas), JANGAN menyinggung HET atau HAP sama sekali di dalam `key_observation` Anda. Fokuslah pada perbandingan dengan data historis (rata-rata, min/max).
 
 ```json
 {
@@ -497,7 +588,7 @@ Cantumkan pada key_observation berapa harga saat ini, HET/HAP , nama undang-unda
         }
     },
     "strategic_analysis": {
-        "causal_hypothesis": "string (Hipotesis utama penyebab pergerakan harga berdasarkan pola data dan konteks musiman)",
+        "causal_hypothesis": "string (Hipotesis utama penyebab pergerakan harga berdasarkan pola data dan konteks musiman, jika ada penurunan harga ke rentang aman juga bisa jadi karena intervensi pasar sebelumnya)",
         "potential_impact_framing": "string (Penjelasan singkat mengenai potensi signifikansi pergerakan harga ini bagi masyarakat lokal)"
     },
     "stakeholder_specific_considerations": {
@@ -641,63 +732,65 @@ PROMPT;
      * @return float
      */
     private function getDynamicVolatilityThreshold(Komoditas $komoditas): float {
-        // Kunci cache yang unik untuk setiap komoditas
         $cacheKey = 'volatility_threshold_' . $komoditas->id_komoditas;
-        // Simpan di cache selama 1 hari. Sesuaikan durasi sesuai kebutuhan.
-        $cacheDuration = now()->addDay();
+        $cacheDuration = now()->addHours(6); // Cache lebih sering untuk data yang dinamis
 
         return Cache::remember($cacheKey, $cacheDuration, function () use ($komoditas) {
-            // 1. Ambil data historis (misal: 2 tahun terakhir) untuk perhitungan
+            // PERBAIKAN: Batasi query untuk performa yang lebih baik
             $twoYearsAgo = now()->subYears(2);
             $allPrices = Harga::where('id_komoditas', $komoditas->id_komoditas)
+                ->limit(1000) // Batasi jumlah record
                 ->get()
-                // Konversi tanggal string ke objek Carbon untuk sorting
-                ->map(function ($price) {
-                    $price->parsed_date = Carbon::createFromFormat('d/m/Y', $price->tanggal);
-                    return $price;
+                ->filter(function ($price) {
+                    try {
+                        $date = Carbon::createFromFormat('d/m/Y', $price->tanggal);
+                        return $price->harga > 0 && $date->gte(now()->subYears(2));
+                    } catch (\Exception $e) {
+                        return false;
+                    }
                 })
-                ->where('parsed_date', '>=', $twoYearsAgo)
-                ->sortBy('parsed_date')
-                ->values(); // Reset keys
+                ->sortBy(function ($price) {
+                    return Carbon::createFromFormat('d/m/Y', $price->tanggal);
+                })
+                ->values();
 
-            // Butuh setidaknya 90 hari data untuk memulai perhitungan
-            if ($allPrices->count() < 90) {
-                // Fallback ke nilai default jika data tidak cukup
-                // Gunakan threshold dari kategori komoditas sebagai fallback yang cerdas
+            // PERBAIKAN: Threshold minimum yang lebih realistis
+            $minimumDataPoints = 60; // Setidaknya 2 bulan data
+            if ($allPrices->count() < $minimumDataPoints) {
                 return $this->getStaticThresholdForCategory($komoditas);
             }
 
-            // 2. Lakukan perhitungan CV 90-hari secara bergulir (rolling)
             $historicalCvs = new Collection();
-            $windowSize = 90;
+            $windowSize = 30; // PERBAIKAN: Window size yang lebih kecil dan realistis
 
             for ($i = $windowSize; $i < $allPrices->count(); $i++) {
                 $window = $allPrices->slice($i - $windowSize, $windowSize);
                 $priceValues = $window->pluck('harga')->map(fn($p) => (float)$p);
 
                 $average = $priceValues->avg();
-                if ($average > 0) {
-                    $mean = $average;
-                    $stdDev = sqrt($priceValues->map(fn($val) => pow($val - $mean, 2))->sum() / $windowSize);
-                    $cv = ($stdDev / $mean) * 100;
+                if ($average > 0 && $priceValues->count() > 1) {
+                    // Gunakan sample standard deviation
+                    $variance = $priceValues->map(fn($val) => pow($val - $average, 2))->sum() / ($priceValues->count() - 1);
+                    $stdDev = sqrt($variance);
+                    $cv = ($stdDev / $average) * 100;
                     $historicalCvs->push($cv);
                 }
             }
 
             if ($historicalCvs->isEmpty()) {
-                return $this->getStaticThresholdForCategory($komoditas); // Fallback lagi
+                return $this->getStaticThresholdForCategory($komoditas);
             }
 
-            // 3. Hitung Persentil ke-95
-            $sortedCvs = $historicalCvs->sort()->values()->all();
-            $count = count($sortedCvs);
-            $index = floor(0.95 * ($count - 1)); // Indeks untuk persentil ke-95
+            // PERBAIHAN: Gunakan percentile yang lebih konservatif
+            $sortedCvs = $historicalCvs->sort()->values();
+            $count = $sortedCvs->count();
 
-            $percentileValue = $sortedCvs[$index];
+            // Gunakan P90 instead of P95 untuk threshold yang lebih realistis
+            $percentileIndex = floor(0.90 * ($count - 1));
+            $percentileValue = $sortedCvs[$percentileIndex];
 
-            // Pastikan threshold tidak terlalu kecil (misal, untuk komoditas yang sangat stabil)
-            // Nilai minimum 10% bisa menjadi batas bawah yang masuk akal.
-            return max(10.0, $percentileValue);
+            // PERBAIKAN: Minimum threshold yang lebih masuk akal
+            return max(5.0, $percentileValue);
         });
     }
 
@@ -707,11 +800,98 @@ PROMPT;
      */
     private function getStaticThresholdForCategory(Komoditas $komoditas): float {
         $kategori = $this->getKategoriKomoditas($komoditas->nama);
+
+        // PERBAIKAN: Threshold yang lebih realistis berdasarkan observasi pasar
         $thresholds = [
-            'POKOK' => 15.0,
-            'PENTING' => 30.0,
-            'VOLATIL' => 50.0,
+            'POKOK' => 8.0,    // Komoditas pokok relatif stabil
+            'PENTING' => 20.0,  // Komoditas penting agak volatil
+            'VOLATIL' => 35.0,  // Komoditas volatil memang tinggi fluktuasinya
         ];
-        return $thresholds[$kategori] ?? 30.0;
+
+        return $thresholds[$kategori] ?? 20.0;
+    }
+
+    /**
+     * Menentukan apakah konteks cuaca relevan untuk dianalisis bagi komoditas tertentu.
+     *
+     * @param Komoditas $komoditas
+     * @return bool
+     */
+    private function isWeatherSensitive(Komoditas $komoditas): bool {
+        $namaLower = strtolower($komoditas->nama);
+
+        // Komoditas yang sangat dipengaruhi cuaca (hortikultura, pertanian primer)
+        $sensitiveKeywords = [
+            'cabai',
+            'bawang',
+            'tomat',
+            'kentang',
+            'sawi',
+            'kangkung',
+            'timun',
+            'kacang panjang',
+            'sayur',
+            'ikan',
+            'udang',
+            'padi',
+            'beras',
+            'jagung'
+        ];
+
+        foreach ($sensitiveKeywords as $keyword) {
+            if (str_contains($namaLower, $keyword)) {
+                return true;
+            }
+        }
+
+        // Komoditas yang kurang dipengaruhi cuaca (olahan, impor, ternak dalam kandang)
+        return false;
+    }
+
+    /**
+     * Memberikan petunjuk konteks spesifik berdasarkan jenis komoditas untuk
+     * membantu AI dalam melakukan analisis penyebab.
+     *
+     * @param Komoditas $komoditas
+     * @return string
+     */
+    private function getCommoditySpecificContext(Komoditas $komoditas): string {
+        $namaLower = strtolower($komoditas->nama);
+        $contexts = [];
+
+        // Konteks untuk Produk Hortikultura (Sangat Volatil)
+        if (str_contains($namaLower, 'cabai') || str_contains($namaLower, 'bawang')) {
+            $contexts[] = "- **Sisi Pasokan (Supply-Side):** Sangat rentan terhadap perubahan cuaca (curah hujan tinggi/kekeringan), serangan hama, dan siklus panen raya/paceklik.";
+            $contexts[] = "- **Sisi Distribusi:** Rantai pasok yang panjang dan sifat produk yang mudah busuk dapat menyebabkan fluktuasi harga yang cepat.";
+            $contexts[] = "- **Sisi Permintaan (Demand-Side):** Permintaan cenderung meningkat tajam menjelang Hari Besar Keagamaan Nasional (HBKN).";
+        }
+        // Konteks untuk Produk Impor
+        elseif (str_contains($namaLower, 'kedelai impor') || str_contains($namaLower, 'bawang putih honan')) {
+            $contexts[] = "- **Faktor Global:** Harga sangat dipengaruhi oleh harga di negara asal, biaya pengiriman (freight cost), dan kebijakan perdagangan internasional.";
+            $contexts[] = "- **Faktor Domestik:** Nilai tukar Rupiah (USD/IDR) memiliki dampak langsung terhadap harga. Kelancaran proses impor dan bongkar muat di pelabuhan juga menjadi faktor kunci.";
+        }
+        // Konteks untuk Daging dan Telur (Peternakan)
+        elseif (str_contains($namaLower, 'daging ayam') || str_contains($namaLower, 'telur ayam')) {
+            $contexts[] = "- **Biaya Produksi:** Harga pakan ternak (terutama jagung dan kedelai) adalah komponen biaya terbesar dan sangat memengaruhi harga jual.";
+            $contexts[] = "- **Siklus Produksi:** Adanya siklus _day-old-chick_ (DOC) dan dinamika populasi ayam di tingkat peternak (misal: afkir dini) sangat berpengaruh.";
+            $contexts[] = "- **Penyakit/Wabah:** Isu seperti flu burung dapat menyebabkan _supply shock_ yang signifikan.";
+        }
+        // Konteks untuk Beras
+        elseif (str_contains($namaLower, 'beras')) {
+            $contexts[] = "- **Kebijakan Pemerintah:** Kebijakan terkait Cadangan Beras Pemerintah (CBP), operasi pasar oleh Bulog, dan penetapan HET sangat dominan.";
+            $contexts[] = "- **Musim Tanam/Panen:** Hasil panen raya dan gadu (musim tanam kedua) menentukan ketersediaan gabah nasional.";
+            $contexts[] = "- **Distribusi:** Kelancaran distribusi dari sentra produksi ke daerah konsumen menjadi faktor penting.";
+        }
+        // Konteks untuk Produk Olahan (Minyak, Gula, Tepung)
+        elseif (str_contains($namaLower, 'minyak goreng') || str_contains($namaLower, 'gula pasir') || str_contains($namaLower, 'tepung terigu')) {
+            $contexts[] = "- **Harga Bahan Baku:** Harga sangat dipengaruhi oleh harga bahan baku internasional (misalnya CPO untuk minyak goreng, gandum untuk tepung).";
+            $contexts[] = "- **Kebijakan Industri & Perdagangan:** Kebijakan seperti Domestic Market Obligation (DMO), subsidi, atau tarif impor sangat berpengaruh.";
+        }
+
+        if (empty($contexts)) {
+            return "- Analisis berfokus pada perbandingan data historis dan tren pasar umum karena tidak ada konteks spesifik yang menonjol untuk komoditas ini.";
+        }
+
+        return implode("\n", $contexts);
     }
 }

@@ -18,22 +18,22 @@ return [
         // Titik-titik sampel untuk analisis level provinsi
         'kalbar_regional' => [
             'singkawang' => [
-                'name' => 'Singkawang (Pusat Perdagangan)',
+                'name' => 'Singkawang',
                 'latitude' => 0.91,
                 'longitude' => 108.98,
             ],
             'sambas' => [
-                'name' => 'Sambas (Sentra Produksi)',
+                'name' => 'Sambas',
                 'latitude' => 1.35,
                 'longitude' => 109.30,
             ],
             'pontianak' => [
-                'name' => 'Pontianak (Ibu Kota/Distribusi)',
+                'name' => 'Pontianak',
                 'latitude' => -0.02,
                 'longitude' => 109.34,
             ],
             'sanggau' => [
-                'name' => 'Sanggau (Pedalaman)',
+                'name' => 'Sanggau',
                 'latitude' => 0.12,
                 'longitude' => 110.58,
             ]
