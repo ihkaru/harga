@@ -341,6 +341,7 @@ class TpidReportService {
 
         // --- PERUBAHAN UTAMA 1: MEMBUAT KONTEKS HET/HAP MENJADI KONDISIONAL ---
         $hetSection = ""; // Default string kosong
+        $hetContextString = ""; // Reset
         $hetInstruction = "Harga diserahkan pada mekanisme pasar. Analisis berfokus pada volatilitas dan tren historis.";
         if ($hetContext) {
             $latestPrice = $stats['latest_price'];
