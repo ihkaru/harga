@@ -351,12 +351,13 @@ class TpidReportService {
             $hetContextString = ""; // Reset
             if ($het > 0) {
                 $hetContextString = "HET (Harga Eceran Tertinggi): " . $het > 1000000 ?  $hetContext['het'] : $het . " berdasarkan " . $hetContext['peraturan'] . ".";
-                if ($latestPrice > $het) {
-                    $selisih = number_format((($latestPrice / $het) - 1) * 100, 2);
-                    $status = "DI ATAS HET ({$selisih}% lebih tinggi)";
-                } else {
-                    $status = "DI BAWAH HET";
-                }
+                $status = "HET DITEMUKAN";
+                // if ($latestPrice > $het) {
+                //     $selisih = number_format((($latestPrice / $het) - 1) * 100, 2);
+                //     $status = "DI ATAS HET ({$selisih}% lebih tinggi)";
+                // } else {
+                //     $status = "DI BAWAH HET";
+                // }
             } elseif (!empty($hapString) && str_contains($hapString, '-')) {
                 list($hapBawah, $hapAtas) = array_map(fn($val) => (int) filter_var($val, FILTER_SANITIZE_NUMBER_INT), explode('-', $hapString));
                 $hetContextString = "HAP (Harga Acuan Penjualan): Rp " . number_format($hapBawah, 0, ',', '.') . " - Rp " . number_format($hapAtas, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
