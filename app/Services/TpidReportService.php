@@ -349,9 +349,8 @@ class TpidReportService {
             $hapString = $hetContext['hap'];
             $status = 'BELUM DITEMUKAN';
             $hetContextString = ""; // Reset
-
             if ($het > 0) {
-                $hetContextString = "HET (Harga Eceran Tertinggi): Rp " . number_format($het, 0, ',', '.') . " berdasarkan " . $hetContext['peraturan'] . ".";
+                $hetContextString = "HET (Harga Eceran Tertinggi): " . $het > 1000000 ?  $hetContext['het'] : $het . " berdasarkan " . $hetContext['peraturan'] . ".";
                 if ($latestPrice > $het) {
                     $selisih = number_format((($latestPrice / $het) - 1) * 100, 2);
                     $status = "DI ATAS HET ({$selisih}% lebih tinggi)";
@@ -521,11 +520,7 @@ Anda akan diberikan tiga metrik volatilitas utama:
 - **Konteks Musiman:** {$musimInfo}
 - **HBKN Terdekat:** {$hbknTerdekat}
 
-**## Konteks Harga Acuan (HET/HAP) ##**
-{$hetContextString}
-
-**## Konteks Cuaca Aktual (Data dari API - 7 Hari Terakhir) ##**
-{$weatherContextJson}
+{$hetSection}
 
 **## Data Harga dan Statistik (90 Hari Terakhir) ##**
 - **Harga Saat Ini:** Rp {$latestPriceFormatted}
@@ -542,10 +537,13 @@ Anda akan diberikan tiga metrik volatilitas utama:
 - **Indeks Volatilitas (0-100):** {$volatilityIndexFormatted}
 - **Debug Info:** {$debugInfo}
 
-{$weatherSection}
-
 **## Riwayat Harga (7 Hari Terakhir) ##**
 {$priceHistoryJson}
+
+
+{$weatherSection}
+
+
 
 ---
 **# BAGIAN 3: INSTRUKSI OUTPUT JSON v2.0 #**

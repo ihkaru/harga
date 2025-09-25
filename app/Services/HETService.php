@@ -73,7 +73,7 @@ class HETService {
         $found = $this->priceControls->first(function ($item) use ($normalizedNameToFind) {
             return $item['normalized_name'] === $normalizedNameToFind;
         });
-        // dump("haha", $found);
+        // dump("normalize " . $normalizedNameToFind, "asli: " . $komoditas->nama, $komoditas, $this->priceControls);
 
         return $found;
     }
