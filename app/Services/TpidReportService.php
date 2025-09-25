@@ -352,6 +352,7 @@ class TpidReportService {
             if ($het > 0) {
                 $hetContextString = "HET (Harga Eceran Tertinggi): " . $het > 1000000 ?  $hetContext['het'] : $het . " berdasarkan " . $hetContext['peraturan'] . ".";
                 $status = "HET DITEMUKAN";
+
                 // if ($latestPrice > $het) {
                 //     $selisih = number_format((($latestPrice / $het) - 1) * 100, 2);
                 //     $status = "DI ATAS HET ({$selisih}% lebih tinggi)";
