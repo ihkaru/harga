@@ -99,12 +99,12 @@ class TpidReportService {
         $isWeatherRelevant = $this->isWeatherSensitive($komoditas);
 
         $allPricesForCommodity = Harga::where('id_komoditas', $komoditas->id_komoditas)
-            ->limit(200) // PERBAIKAN: Tambah limit untuk mencegah memory issue
             ->get();
 
         // PERBAIKAN: Validasi data sebelum sorting
         $validPrices = $allPricesForCommodity->filter(function ($price) {
             try {
+                // BUG FIX: Use createFromFormat for accurate parsing
                 Carbon::createFromFormat('d/m/Y', $price->tanggal);
                 return $price->harga > 0;
             } catch (\Exception $e) {
@@ -740,7 +740,6 @@ PROMPT;
             // PERBAIKAN: Batasi query untuk performa yang lebih baik
             $twoYearsAgo = now()->subYears(2);
             $allPrices = Harga::where('id_komoditas', $komoditas->id_komoditas)
-                ->limit(1000) // Batasi jumlah record
                 ->get()
                 ->filter(function ($price) {
                     try {
