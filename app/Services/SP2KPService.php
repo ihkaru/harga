@@ -197,6 +197,14 @@ class SP2KPService {
         $startDate = $startDate ?? Carbon::now()->subDays(3)->format('Y-m-d');
         $endDate = $endDate ?? Carbon::now()->format('Y-m-d');
 
+        // Ensure dates are in Y-m-d format
+        if ($startDate instanceof Carbon) {
+            $startDate = $startDate->format('Y-m-d');
+        }
+        if ($endDate instanceof Carbon) {
+            $endDate = $endDate->format('Y-m-d');
+        }
+
         Log::info("Starting harvest", [
             'start_date' => $startDate,
             'end_date' => $endDate,
@@ -295,7 +303,7 @@ class SP2KPService {
                 'from' => $lastDate->format('Y-m-d'),
                 'to' => $now->format('Y-m-d')
             ]);
-            self::harvestAllData($lastDate, $now);
+            self::harvestAllData($lastDate->format('Y-m-d'), $now->format('Y-m-d'));
         } else {
             Log::info("No update needed - data is up to date");
         }
