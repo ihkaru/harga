@@ -11,8 +11,7 @@ use Exception;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
-class SP2KPService
-{
+class SP2KPService {
     /**
      * Base URL for SP2KP API
      */
@@ -51,12 +50,19 @@ class SP2KPService
             'pasar_id' => $pasarId
         ];
 
+        Log::info("SP2KP API Request", $params);
+
         try {
             $response = Http::get($url, $params);
 
             // dump($response, $response->successful(), $response->json());
             if ($response->successful()) {
-                return $response->json();
+                $data = $response->json();
+                Log::info("SP2KP API Response Success", [
+                    'data_count' => count($data['data'] ?? []),
+                    'meta' => $data['meta'] ?? null
+                ]);
+                return $data;
             } else {
                 Log::error("SP2KP API request failed", [
                     'status' => $response->status(),
@@ -81,11 +87,12 @@ class SP2KPService
      * @param array $data
      * @return int Number of records processed
      */
-    public static function processAndSaveData(array $data): int
-    {
+    public static function processAndSaveData(array $data): int {
         $count = 0;
         $komoditas = Komoditas::get();
         // dump($data);
+
+        Log::info("Processing data batch", ['total_items' => count($data)]);
 
         $now = now();
         foreach ($data as $item) {
@@ -99,6 +106,12 @@ class SP2KPService
                 $pekan = Helpers::calculateWeeks($date);
                 $namaKomoditas = $item['produk']['nama'];
                 $komoditasItem = $komoditas->filter(fn($i) => $i->nama == $namaKomoditas)->first();
+
+                if (!$komoditasItem) {
+                    Log::warning("Komoditas not found", ['nama_komoditas' => $namaKomoditas]);
+                    continue;
+                }
+
                 $idKomoditas = str_pad($komoditasItem->id_komoditas * 1, 3, '0', STR_PAD_LEFT);
                 $idKomoditasHarian = "$idKomoditas-" . $date->format("Y-n-d");
 
@@ -142,16 +155,26 @@ class SP2KPService
                     $hargaData
                 );
 
+                Log::debug("Data saved", [
+                    'id_komoditas_harian' => $idKomoditasHarian,
+                    'tanggal' => $date->format('Y-m-d'),
+                    'komoditas' => $namaKomoditas,
+                    'harga' => $item['harga']
+                ]);
+
                 $count++;
             } catch (\Exception $e) {
                 // dump("Error:", $e);
                 Log::error("Error processing SP2KP data item", [
                     'message' => $e->getMessage(),
-                    'item_id' => $item['id'] ?? 'unknown'
+                    'item_id' => $item['id'] ?? 'unknown',
+                    'tanggal' => $item['tanggal'] ?? 'unknown',
+                    'trace' => $e->getTraceAsString()
                 ]);
             }
         }
 
+        Log::info("Data batch processed", ['successful_count' => $count]);
 
         return $count;
     }
@@ -174,6 +197,13 @@ class SP2KPService
         $startDate = $startDate ?? Carbon::now()->subDays(3)->format('Y-m-d');
         $endDate = $endDate ?? Carbon::now()->format('Y-m-d');
 
+        Log::info("Starting harvest", [
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'tipe_komoditas_id' => $tipeKomoditasId,
+            'pasar_id' => $pasarId
+        ]);
+
         $skip = 0;
         $take = 10000;
         $totalProcessed = 0;
@@ -191,6 +221,7 @@ class SP2KPService
             );
 
             if (empty($response) || !isset($response['data']) || empty($response['data'])) {
+                Log::warning("No data returned from API", ['page' => $currentPage]);
                 break;
             }
 
@@ -204,32 +235,69 @@ class SP2KPService
                 $currentPage = $response['meta']['page'] ?? 1;
             }
 
+            Log::info("Page processed", [
+                'current_page' => $currentPage,
+                'total_pages' => $totalPages,
+                'processed_this_page' => $processedCount,
+                'total_processed' => $totalProcessed
+            ]);
+
             // Prepare next page
             $skip += $take;
             $currentPage++;
         } while ($currentPage <= $totalPages);
 
-        return [
+        $result = [
             'total_processed' => $totalProcessed,
             'total_pages' => $totalPages,
             'start_date' => $startDate,
             'end_date' => $endDate,
         ];
+
+        Log::info("Harvest completed", $result);
+
+        return $result;
     }
 
-    public static function updateLatestData()
-    {
+    public static function updateLatestData() {
+        Log::info("Starting updateLatestData");
+
         // $lastDate = Carbon::createFromFormat('Y-m-d', Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first()->tanggal);
         try {
-            $lastDate = Carbon::createFromFormat('d/m/Y', Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first()->tanggal);
+            $lastHarga = Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first();
+
+            if (!$lastHarga) {
+                Log::warning("No existing data in Harga table");
+                return;
+            }
+
+            $lastDate = Carbon::createFromFormat('d/m/Y', $lastHarga->tanggal);
+            Log::info("Last date from database (d/m/Y format)", ['last_date' => $lastDate->format('Y-m-d')]);
         } catch (Exception $e) {
-            $lastDate = Carbon::createFromFormat('Y-m-d', Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first()->tanggal);
+            $lastHarga = Harga::orderByRaw("CONCAT(tahun,bulan,tanggal_angka) DESC")->first();
+            $lastDate = Carbon::createFromFormat('Y-m-d', $lastHarga->tanggal);
+            Log::info("Last date from database (Y-m-d format)", ['last_date' => $lastDate->format('Y-m-d')]);
         }
+
         // $now = TanggalMerah::getHariTerakhirTidakLibur();
         $now = Carbon::parse($lastDate)->addDays(5);
+
+        Log::info("Date comparison", [
+            'last_date' => $lastDate->format('Y-m-d'),
+            'target_date' => $now->format('Y-m-d'),
+            'is_different' => !$lastDate->isSameDay($now),
+            'is_before' => $lastDate->lt($now)
+        ]);
+
         if ($lastDate->lt($now) && !$lastDate->isSameDay($now)) {
             // dump($lastDate, $now);
+            Log::info("Triggering harvest for date range", [
+                'from' => $lastDate->format('Y-m-d'),
+                'to' => $now->format('Y-m-d')
+            ]);
             self::harvestAllData($lastDate, $now);
+        } else {
+            Log::info("No update needed - data is up to date");
         }
     }
 }
