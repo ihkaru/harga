@@ -24,14 +24,6 @@ class TpidController extends Controller {
         // Hasilkan prompt
         $prompt = $this->tpidReportService->generateTpidAnalysisPrompt($komoditas, $currentDate);
 
-        // Di sini Anda akan mengirimkan $prompt ke API LLM pilihan Anda (misal: OpenAI, Google AI)
-        // $llmResponse = Http::withToken(env('OPENAI_API_KEY'))->post('https://api.openai.com/v1/chat/completions', [
-        //     'model' => 'gpt-4',
-        //     'messages' => [
-        //         ['role' => 'user', 'content' => $prompt]
-        //     ]
-        // ]);
-
         // Untuk tujuan demonstrasi, kita tampilkan saja prompt-nya
         return response()->json([
             'komoditas' => $komoditas->nama,
