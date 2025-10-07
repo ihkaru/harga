@@ -26,7 +26,7 @@ class KomoditasController extends Controller {
         # Cek data terakhir yang masuk ke database
         // SP2KPService::updateLatestData();
         $data = Komoditas::with(['hargas' => function ($query) {
-            $query->orderBy('id_komoditas_harian', 'asc'); // Ganti 'asc' dengan 'desc' jika ingin urutan menurun
+            $query->orderByRaw("STR_TO_DATE(tanggal, '%e/%c/%Y') ASC"); // Ganti 'asc' dengan 'desc' jika ingin urutan menurun
         }])->get();
         // dd(count($data));
         if (count($data) < 1) {
@@ -49,9 +49,9 @@ class KomoditasController extends Controller {
             }
             Harga::where('harga', 0)->delete();
             try {
-                $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
+                $last_date = Carbon::createFromFormat('d/m/Y', Harga::orderByRaw("STR_TO_DATE(tanggal, '%e/%c/%Y') DESC")->first()->tanggal)->toDateString();
             } catch (Exception $e) {
-                $last_date = Carbon::createFromFormat('Y-m-d', Harga::orderBy('tanggal', 'desc')->first()->tanggal)->toDateString();
+                $last_date = Carbon::createFromFormat('Y-m-d', Harga::orderByRaw("STR_TO_DATE(tanggal, '%e/%c/%Y') DESC")->first()->tanggal)->toDateString();
             }
             return response()->json(["message" => "success", 'last_date' => $last_date, 'last_try' => $last_try])->header('Access-Control-Allow-Origin', '*');;
         } catch (Exception $e) {
